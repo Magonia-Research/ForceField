@@ -223,3 +223,8 @@ __pycache__/
 .venv/
 hooks/sigma_rules.json
 hooks/security.log
+
+# Local research + auto-injected files — never ship to the public repo
+/CLAUDE.md
+intel/
+*.fts-bak
