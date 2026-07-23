@@ -28,25 +28,49 @@ log_event() {
 }
 
 # -----------------------------------------------------------
+# Normalize the command for threat matching only (NORM is never
+# executed). This collapses the obfuscations that let an rm slip
+# past a plain-string match: ${IFS}/$IFS become spaces, quotes and
+# backslashes are removed (\rm, 'rm'), an absolute path is reduced
+# to its basename (/bin/rm -> rm), and wrapper / env-assignment
+# prefixes are dropped (env rm, FOO=bar rm -> rm). Raw $CMD is kept
+# for logging and for the obfuscation check below. The threat greps
+# still require an operator boundary before rm, so 'git rm' and
+# similar sub-commands stay allowed.
+# -----------------------------------------------------------
+
+NORM=$(printf '%s' "$CMD" | sed -E 's/\$\{IFS\}/ /g; s/\$IFS/ /g' \
+  | tr -d '\\' | tr -d '"' | tr -d "'")
+NORM=$(printf '%s' "$NORM" \
+  | sed -E 's#(^|[[:space:];&|(])[^[:space:];&|]*/rm([[:space:]]|$)#\1rm\2#g')
+for _ in 1 2 3; do
+  NORM=$(printf '%s' "$NORM" | sed -E \
+    's/(^|[[:space:];&|(])([A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|]*|env|command|builtin|exec|time|nice|nohup|stdbuf|setsid)[[:space:]]+/\1/g')
+done
+
+# -----------------------------------------------------------
 # Block: rm with recursive + force flags
 # -----------------------------------------------------------
 
-if echo "$CMD" | grep -qiE '(^|;[[:space:]]*|&&[[:space:]]*|[|][|][[:space:]]*|[|][[:space:]]*)rm[[:space:]]' \
-  && echo "$CMD" | grep -qiE '(^|[[:space:]])-[a-zA-Z]*[rR]|--recursive' \
-  && echo "$CMD" | grep -qiE '(^|[[:space:]])-[a-zA-Z]*[fF]|--force'; then
+if echo "$NORM" | grep -qiE '(^|;[[:space:]]*|&&[[:space:]]*|[|][|][[:space:]]*|[|][[:space:]]*)rm[[:space:]]' \
+  && echo "$NORM" | grep -qiE '(^|[[:space:]])-[a-zA-Z]*[rR]|--recursive' \
+  && echo "$NORM" | grep -qiE '(^|[[:space:]])-[a-zA-Z]*[fF]|--force'; then
   log_event "deny" "rm_rf"
   echo 'BLOCKED: Use trash instead of rm -rf' >&2
   exit 2
 fi
 
 # -----------------------------------------------------------
-# Block: Obfuscation (hex/octal escape sequences, parameter
-# expansion tricks). Checked BEFORE allowlist to catch evasion.
+# Block: Obfuscation (hex/octal escape sequences). Checked
+# BEFORE allowlist to catch evasion. Parameter-expansion forms
+# like ${#arr[@]}, ${var##*/}, ${file%%.*} are NOT flagged: they
+# are common, legitimate shell, and hard-denying them (a deny,
+# not an ask) violated the zero-false-positive rule.
 # -----------------------------------------------------------
 
-if echo "$CMD" | grep -qE '(\\x[0-9a-fA-F]{2}|\\[0-7]{3}|\$\{[^}]*#|\$\{[^}]*%%)'; then
+if echo "$CMD" | grep -qE '(\\x[0-9a-fA-F]{2}|\\[0-7]{3})'; then
   log_event "deny" "obfuscation"
-  echo 'BLOCKED: Obfuscated command detected (hex/octal escapes or parameter expansion tricks).' >&2
+  echo 'BLOCKED: Obfuscated command detected (hex/octal escape sequences).' >&2
   echo 'If this is legitimate, write it in plain text.' >&2
   exit 2
 fi
@@ -55,7 +79,7 @@ fi
 # Block: Container escape techniques (never legitimate in dev)
 # -----------------------------------------------------------
 
-if echo "$CMD" | grep -qE '(nsenter\s+|unshare\s+.*--mount|ptrace)'; then
+if echo "$NORM" | grep -qE '(nsenter\s+|unshare\s+.*--mount|ptrace)'; then
   log_event "deny" "container_escape"
   echo 'BLOCKED: Container escape technique detected (nsenter/unshare/ptrace).' >&2
   echo 'These tools break container isolation and have no legitimate dev use.' >&2
@@ -63,10 +87,15 @@ if echo "$CMD" | grep -qE '(nsenter\s+|unshare\s+.*--mount|ptrace)'; then
 fi
 
 # -----------------------------------------------------------
-# Ask: Over-privileged container flags
+# Ask: Over-privileged container flags. Checked against both NORM
+# (catches quote/IFS obfuscation of a flag like --privileged) and the
+# raw CMD (NORM strips key=value tokens, which would otherwise hide
+# `--security-opt seccomp=unconfined`).
 # -----------------------------------------------------------
 
-if echo "$CMD" | grep -qE '(--privileged|--pid=host|--net=host|-v\s+/:/|mount\s+.*-o\s+.*bind)'; then
+OVERPRIV_PATTERN='(--privileged|--cap-add[= ](ALL|all)|(seccomp|apparmor)[=:]unconfined|--pid[= ]host|--net(work)?[= ]host|--ipc[= ]host|--uts[= ]host|--userns[= ]host|-v[= ]/:|--volume[= ]/:|--device[= ]|mount[[:space:]].*-o[[:space:]].*bind)'
+
+if echo "$NORM" | grep -qE "$OVERPRIV_PATTERN" || echo "$CMD" | grep -qE "$OVERPRIV_PATTERN"; then
   log_event "ask" "container_overprivileged"
   REASON='CONTAINER-FIRST: Over-privileged container detected.\n\nBest practices:\n- Use --cap-add=<SPECIFIC_CAP> instead of --privileged\n- Use --network=<name> instead of --net=host\n- Mount specific paths read-only (-v /path:/path:ro) instead of mounting /\n- For nested containers, use --device /dev/fuse instead of --privileged\n\nIf this is genuinely required (e.g., CI runner, GPU access), approve to proceed.'
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"%s"}}' "$REASON"
@@ -77,7 +106,7 @@ fi
 # Block: Kernel/system manipulation
 # -----------------------------------------------------------
 
-if echo "$CMD" | grep -qE '(insmod|modprobe|sysctl\s+-w|echo.*>\s*/proc/|echo.*>\s*/sys/)'; then
+if echo "$NORM" | grep -qE '(insmod|modprobe|sysctl\s+-w|echo.*>\s*/proc/|echo.*>\s*/sys/)'; then
   log_event "deny" "kernel_manipulation"
   echo 'BLOCKED: Kernel/system manipulation detected.' >&2
   echo 'Loading modules or writing to /proc and /sys is not permitted.' >&2
@@ -85,13 +114,15 @@ if echo "$CMD" | grep -qE '(insmod|modprobe|sysctl\s+-w|echo.*>\s*/proc/|echo.*>
 fi
 
 # -----------------------------------------------------------
-# Compound command gate: if the command contains chaining
-# operators, skip the allowlist (compound commands must go
-# through all detection checks below).
+# Compound command gate: if the command chains, substitutes,
+# or redirects, skip the allowlist (these must go through all
+# detection checks below). Command/process substitution and
+# redirects are included so an allowlisted head like `cat` can
+# not smuggle a fetch through `cat $(curl evil)` or `> file`.
 # -----------------------------------------------------------
 
 IS_COMPOUND=false
-if echo "$CMD" | grep -qE '(;|&&|\|\||[|])'; then
+if echo "$CMD" | grep -qE '(;|&&|\|\||[|]|\$\(|`|>|<|&)'; then
   IS_COMPOUND=true
 fi
 
@@ -129,9 +160,10 @@ if [[ "$IS_COMPOUND" == "false" ]]; then
     exit 0
   fi
 
-  # Simple info commands
+  # Simple info commands. `env` and `source` are intentionally excluded:
+  # both run arbitrary commands, so they must not get a silent wave-through.
   if echo "$CMD" | grep -qE \
-    '^\s*(echo |printf |which |type |command |cat |head |tail |env |export |source |true|false|:)'; then
+    '^\s*(echo |printf |which |type |command |cat |head |tail |export |true|false|:)'; then
     log_event "allow" "allowlist_info"
     exit 0
   fi
@@ -146,7 +178,7 @@ INSTALL_PATTERN='(pip3?\s+install|python3?\s+-m\s+pip\s+install|npm\s+install|pn
 
 if echo "$CMD" | grep -qiE "$INSTALL_PATTERN"; then
   log_event "ask" "host_pkg_install"
-  REASON='CONTAINER-FIRST: Package install detected on host OS.\n\n- Python: podman run --rm -v ./data:/data:ro python:3.13-slim sh -c "pip install PKG && python /data/script.py"\n- Node: podman run --rm -v ./src:/src:ro node:22-slim npx <tool>\n- System: podman run --rm <image> instead of brew/apt-get\n- Rust: cargo install goes to ~/.cargo/bin — clean up after\n\nIf this install is necessary on the host, approve to proceed.'
+  REASON='CONTAINER-FIRST: Package install detected on host OS.\n\n- Python: podman run --rm -v ./data:/data:ro python:3.13-slim sh -c \"pip install PKG && python /data/script.py\"\n- Node: podman run --rm -v ./src:/src:ro node:22-slim npx <tool>\n- System: podman run --rm <image> instead of brew/apt-get\n- Rust: cargo install goes to ~/.cargo/bin, clean up after\n\nIf this install is necessary on the host, approve to proceed.'
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"%s"}}' "$REASON"
   exit 0
 fi

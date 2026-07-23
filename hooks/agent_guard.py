@@ -24,17 +24,15 @@ import json
 import os
 import re
 import sys
-import tempfile
 import time
 from pathlib import Path
 
-MAX_STDIN_BYTES = 1_048_576
-MAX_PROMPT_WARN = 5_000
 MAX_PROMPT_ASK = 10_000
 MAX_SPAWNS_ASK = 10
 MAX_SPAWNS_DENY = 20
 
 sys.path.insert(0, str(Path(__file__).parent))
+from patterns import MAX_STDIN_BYTES, DECISION_PRECEDENCE as _DECISION_PRECEDENCE  # noqa: E402
 from credential_guard import CREDENTIAL_PATTERNS, is_fake_value  # noqa: E402
 from allowlist import is_suppressed  # noqa: E402
 from hook_logging import log_security_event  # noqa: E402
@@ -136,8 +134,6 @@ SENSITIVE_PATH_PATTERNS = re.compile(
 )
 
 ASK_MODES = frozenset(["bypassPermissions", "dontAsk"])
-
-_DECISION_PRECEDENCE = {"deny": 3, "ask": 2, "allow": 1}
 
 
 def _state_dir() -> Path:

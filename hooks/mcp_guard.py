@@ -18,30 +18,11 @@ import re
 import sys
 from pathlib import Path
 
-MAX_STDIN_BYTES = 1_048_576  # 1 MiB guard against oversized input
-
 sys.path.insert(0, str(Path(__file__).parent))
+from patterns import MAX_STDIN_BYTES  # noqa: E402
 from allowlist import is_suppressed  # noqa: E402
 from hook_logging import log_security_event  # noqa: E402
-
-CREDENTIAL_PATTERNS = {
-    "openai_key": re.compile(r"sk-[a-zA-Z0-9]{20,}"),
-    "anthropic_key": re.compile(r"sk-ant-[a-zA-Z0-9-]{20,}"),
-    "github_token": re.compile(r"ghp_[a-zA-Z0-9]{36}"),
-    "github_fine_grained": re.compile(r"github_pat_[a-zA-Z0-9_]{20,}"),
-    "aws_access_key": re.compile(r"AKIA[0-9A-Z]{16}"),
-    "private_key_header": re.compile(
-        r"-----BEGIN\s+(RSA|DSA|EC|OPENSSH|PGP)\s+PRIVATE\s+KEY-----"
-    ),
-    "jwt_token": re.compile(
-        r"eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\."
-    ),
-    "slack_token": re.compile(r"xox[baprs]-[a-zA-Z0-9-]+"),
-    "stripe_key": re.compile(r"(sk|pk)_(test|live)_[a-zA-Z0-9]{24,}"),
-    "generic_password": re.compile(
-        r"(?i)(password|passwd|pwd)\s*[=:]\s*['\"][^'\"]{8,}['\"]"
-    ),
-}
+from credential_guard import CREDENTIAL_PATTERNS, is_fake_value  # noqa: E402
 
 EXFIL_INDICATORS = {
     "base64_blob": re.compile(r"[A-Za-z0-9+/]{60,}={0,2}"),
@@ -96,10 +77,20 @@ def extract_all_string_values(obj, depth: int = 0) -> list[str]:
 
 
 def check_for_credentials(text: str) -> tuple[str, str] | None:
-    for name, pattern in CREDENTIAL_PATTERNS.items():
-        match = pattern.search(text)
-        if match:
-            return (name, match.group(0))
+    """Scan text for a real credential, skipping placeholder/example values.
+
+    Uses ``credential_guard``'s shared pattern set and ``is_fake_value`` so MCP
+    argument scanning matches the file-write guard and does not flag obvious
+    placeholders. Scans line by line to give ``is_fake_value`` its line context.
+    """
+    for line in text.splitlines():
+        for name, pattern in CREDENTIAL_PATTERNS.items():
+            match = pattern.search(line)
+            if match:
+                matched_text = match.group(0)
+                if is_fake_value(matched_text, line):
+                    continue
+                return (name, matched_text)
     return None
 
 
@@ -126,6 +117,67 @@ def format_alert(
     return msg
 
 
+def _respond(
+    tool_name: str, category: str, result: tuple[str, str], net: bool,
+) -> dict | None:
+    """Build an ask response for a detected pattern, honoring suppression."""
+    pattern_name, matched_text = result
+    if is_suppressed("mcp_guard", pattern_name=pattern_name):
+        log_security_event(
+            "mcp_guard", "allow",
+            pattern_matched=pattern_name,
+            extra={"tool": tool_name, "network_capable": net, "suppressed": True},
+        )
+        return None
+    log_security_event(
+        "mcp_guard", "ask",
+        pattern_matched=pattern_name,
+        extra={"tool": tool_name, "network_capable": net},
+    )
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "ask",
+            "permissionDecisionReason": format_alert(
+                pattern_name, matched_text, tool_name, category,
+            ),
+        },
+    }
+
+
+def evaluate_mcp_tool(tool_name: str, tool_input: dict) -> dict | None:
+    """Scan an MCP tool call for credential/exfil leakage; return ask or None.
+
+    Every ``mcp__*`` tool is scanned by default: any MCP server can be an
+    exfiltration channel (email draft, doc/file create, webhook relay, code
+    execution), so the hardcoded network-capable prefix list is only a
+    severity hint recorded in the log, not the gate that decides whether to
+    scan.
+    """
+    if not tool_name.startswith("mcp__"):
+        return None
+
+    combined = "\n".join(extract_all_string_values(tool_input))
+    if not combined:
+        return None
+
+    net = is_network_capable(tool_name)
+
+    cred_result = check_for_credentials(combined)
+    if cred_result:
+        return _respond(tool_name, "Credential", cred_result, net)
+
+    exfil_result = check_for_exfil(combined)
+    if exfil_result:
+        return _respond(tool_name, "Exfiltration indicator", exfil_result, net)
+
+    log_security_event(
+        "mcp_guard", "allow",
+        extra={"tool": tool_name, "network_capable": net},
+    )
+    return None
+
+
 def main() -> None:
     try:
         raw = sys.stdin.read(MAX_STDIN_BYTES)
@@ -135,86 +187,11 @@ def main() -> None:
         return
 
     tool_name = input_data.get("tool_name", "")
-
-    if not tool_name.startswith("mcp__"):
-        json.dump({}, sys.stdout)
-        return
-
-    if not is_network_capable(tool_name):
-        json.dump({}, sys.stdout)
-        return
-
     tool_input = input_data.get("tool_input", {})
-    all_values = extract_all_string_values(tool_input)
-    combined = "\n".join(all_values)
-
-    if not combined:
-        json.dump({}, sys.stdout)
-        return
-
-    cred_result = check_for_credentials(combined)
-    if cred_result:
-        pattern_name, matched_text = cred_result
-        if is_suppressed("mcp_guard", pattern_name=pattern_name):
-            log_security_event(
-                "mcp_guard", "allow",
-                pattern_matched=pattern_name,
-                extra={"tool": tool_name, "suppressed": True},
-            )
-            json.dump({}, sys.stdout)
-            return
-
-        log_security_event(
-            "mcp_guard", "ask",
-            pattern_matched=pattern_name,
-            extra={"tool": tool_name},
-        )
-        response = {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "ask",
-                "permissionDecisionReason": format_alert(
-                    pattern_name, matched_text, tool_name, "Credential",
-                ),
-            },
-        }
-        json.dump(response, sys.stdout)
-        return
-
-    exfil_result = check_for_exfil(combined)
-    if exfil_result:
-        pattern_name, matched_text = exfil_result
-        if is_suppressed("mcp_guard", pattern_name=pattern_name):
-            log_security_event(
-                "mcp_guard", "allow",
-                pattern_matched=pattern_name,
-                extra={"tool": tool_name, "suppressed": True},
-            )
-            json.dump({}, sys.stdout)
-            return
-
-        log_security_event(
-            "mcp_guard", "ask",
-            pattern_matched=pattern_name,
-            extra={"tool": tool_name},
-        )
-        response = {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "ask",
-                "permissionDecisionReason": format_alert(
-                    pattern_name, matched_text, tool_name, "Exfiltration indicator",
-                ),
-            },
-        }
-        json.dump(response, sys.stdout)
-        return
-
-    log_security_event(
-        "mcp_guard", "allow",
-        extra={"tool": tool_name},
-    )
-    json.dump({}, sys.stdout)
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    response = evaluate_mcp_tool(tool_name, tool_input)
+    json.dump(response if response else {}, sys.stdout)
 
 
 if __name__ == "__main__":

@@ -16,10 +16,10 @@ import re
 import sys
 from pathlib import Path
 
-MAX_STDIN_BYTES = 1_048_576
 MAX_SCAN_BYTES = 204_800
 
 sys.path.insert(0, str(Path(__file__).parent))
+from patterns import MAX_STDIN_BYTES  # noqa: E402
 from allowlist import is_suppressed  # noqa: E402
 from hook_logging import log_security_event  # noqa: E402
 
@@ -57,6 +57,22 @@ INJECTION_PATTERNS = {
         r"(ignore|instruction|override|system|disregard|bypass)"
         r"|<!--\s*(ignore|instruction|system|override|important"
         r"|disregard|bypass)[^-]*-->"
+    ),
+    "ai_addressed_in_data": re.compile(
+        r"(?i)\b(?:dear|hey|hello|attention)\s+"
+        r"(?:ai|claude|assistant|language\s+model|gpt|llm)\b"
+    ),
+    "fake_conversation": re.compile(
+        r"(?i)(?:^|\n)\s*(?:human|user)\s*:\s*.+\n\s*(?:assistant|ai)\s*:"
+    ),
+    "prompt_extraction": re.compile(
+        r"(?i)(?:repeat|show|print|reveal|display)\s+"
+        r"(?:everything|all|the|your)\s+"
+        r"(?:above|instructions?|system\s+prompt|rules)"
+    ),
+    "mode_escalation": re.compile(
+        r"(?i)(?:developer|debug|admin|god)\s+mode\s+"
+        r"(?:enabled|activated|on)\b"
     ),
 }
 

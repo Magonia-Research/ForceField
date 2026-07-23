@@ -16,9 +16,8 @@ import re
 import sys
 from pathlib import Path
 
-MAX_STDIN_BYTES = 1_048_576
-
 sys.path.insert(0, str(Path(__file__).parent))
+from patterns import MAX_STDIN_BYTES  # noqa: E402
 from credential_guard import CREDENTIAL_PATTERNS, is_fake_value  # noqa: E402
 from allowlist import is_suppressed  # noqa: E402
 from hook_logging import log_security_event  # noqa: E402

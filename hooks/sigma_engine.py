@@ -220,24 +220,21 @@ def evaluate_rule(rule, command, image):
 
     elif condition_type == "named_and":
         groups = condition_meta.get("groups", [])
-        selection_match = all(sel_results.get(g, False) for g in groups)
+        selection_match = all(sel_results.get(g, False) for g in groups) if groups else False
 
-    elif condition_type == "named_and_multi":
+    elif condition_type in ("named_and_multi", "named_and_minus_filters"):
+        # "named_and_minus_filters" is "sel_a and sel_b and not filter": the
+        # filter half is applied by the global suppression below, so here we
+        # only require every named selection to match (as with named_and_multi).
         sels = condition_meta.get("selections", [])
-        selection_match = all(sel_results.get(s, False) for s in sels)
+        selection_match = all(sel_results.get(s, False) for s in sels) if sels else False
 
-    elif condition_type == "named_selection_minus_filter":
+    elif condition_type in (
+        "named_selection_minus_filter",
+        "named_selection_minus_filters",
+    ):
         groups = condition_meta.get("groups", [])
-        if groups:
-            selection_match = sel_results.get(groups[0], False)
-
-    elif condition_type == "named_selection_minus_filters":
-        groups = condition_meta.get("groups", [])
-        if groups:
-            selection_match = sel_results.get(groups[0], False)
-        else:
-            sel_keys = [k for k in sel_results if k.startswith("selection")]
-            selection_match = all(sel_results[k] for k in sel_keys) if sel_keys else False
+        selection_match = sel_results.get(groups[0], False) if groups else False
 
     if not selection_match:
         return False

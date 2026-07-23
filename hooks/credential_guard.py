@@ -16,9 +16,8 @@ import sys
 from fnmatch import fnmatch
 from pathlib import Path
 
-MAX_STDIN_BYTES = 1_048_576  # 1 MiB guard against oversized input
-
 sys.path.insert(0, str(Path(__file__).parent))
+from patterns import MAX_STDIN_BYTES  # noqa: E402
 from allowlist import is_suppressed  # noqa: E402
 from hook_logging import log_security_event  # noqa: E402
 
@@ -26,8 +25,13 @@ CREDENTIAL_PATTERNS = {
     "openai_key": re.compile(r"sk-[a-zA-Z0-9]{20,}"),
     "anthropic_key": re.compile(r"sk-ant-[a-zA-Z0-9-]{20,}"),
     "github_token": re.compile(r"ghp_[a-zA-Z0-9]{36}"),
+    "github_oauth_token": re.compile(r"gho_[a-zA-Z0-9]{36}"),
+    "github_server_token": re.compile(r"ghs_[a-zA-Z0-9]{36}"),
     "github_fine_grained": re.compile(r"github_pat_[a-zA-Z0-9_]{20,}"),
+    "gitlab_token": re.compile(r"glpat-[a-zA-Z0-9_-]{20}"),
+    "npm_token": re.compile(r"npm_[a-zA-Z0-9]{36}"),
     "aws_access_key": re.compile(r"AKIA[0-9A-Z]{16}"),
+    "aws_sts_key": re.compile(r"ASIA[0-9A-Z]{16}"),
     "aws_secret_key": re.compile(
         r"(?i)aws_secret_access_key\s*[=:]\s*[a-zA-Z0-9/+=]{40}"
     ),
@@ -118,8 +122,13 @@ PATTERN_DESCRIPTIONS = {
     "openai_key": "OpenAI API key",
     "anthropic_key": "Anthropic API key",
     "github_token": "GitHub personal access token",
+    "github_oauth_token": "GitHub OAuth token",
+    "github_server_token": "GitHub server-to-server token",
     "github_fine_grained": "GitHub fine-grained token",
+    "gitlab_token": "GitLab personal access token",
+    "npm_token": "npm access token",
     "aws_access_key": "AWS access key ID",
+    "aws_sts_key": "AWS STS temporary access key",
     "aws_secret_key": "AWS secret access key",
     "private_key_header": "Private key file",
     "jwt_token": "JWT token",

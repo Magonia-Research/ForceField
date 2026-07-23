@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Consolidated security dispatcher for Claude Code Bash hooks.
 
-Runs exfil_guard + supply_chain_guard in a single Python process,
-eliminating two extra interpreter cold-starts (~100ms saved).
+Runs exfil_guard + supply_chain_guard + git_guard in a single Python process,
+eliminating extra interpreter cold-starts.
 
 Input: JSON on stdin (Claude Code PreToolUse hook format)
 Output: JSON on stdout (hook response)
@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from patterns import MAX_STDIN_BYTES, DECISION_PRECEDENCE as _DECISION_PRECEDENCE  # noqa: E402
 from exfil_guard import check_command as exfil_check  # noqa: E402
 from exfil_guard import format_alert as exfil_format  # noqa: E402
 from exfil_guard import HARD_DENY_PATTERNS as EXFIL_HARD_DENY  # noqa: E402
@@ -29,10 +30,14 @@ from supply_chain_guard import (  # noqa: E402
     is_allowlisted as supply_allowlisted,
     HARD_DENY_PATTERNS as SUPPLY_HARD_DENY,
 )
+from git_guard import check_git  # noqa: E402
+from git_guard import format_alert as git_format  # noqa: E402
+from git_guard import HARD_DENY_PATTERNS as GIT_HARD_DENY  # noqa: E402
+from credential_access_guard import check_command as cred_access_check  # noqa: E402
+from credential_access_guard import format_alert as cred_access_format  # noqa: E402
+from credential_access_guard import HARD_DENY_PATTERNS as CRED_ACCESS_HARD_DENY  # noqa: E402
 from allowlist import is_suppressed  # noqa: E402
 from hook_logging import log_security_event  # noqa: E402
-
-MAX_STDIN_BYTES = 1_048_576  # 1 MiB guard against oversized input
 
 
 def run_exfil_guard(command: str) -> dict[str, object] | None:
@@ -124,7 +129,64 @@ def run_supply_chain_guard(command: str) -> dict[str, object] | None:
     return None
 
 
-_DECISION_PRECEDENCE = {"deny": 3, "ask": 2, "allow": 1}
+def run_git_guard(command: str) -> dict[str, object] | None:
+    """Run git repo-execution guard checks. Returns response dict or None."""
+    result = check_git(command)
+    if result is None:
+        return None
+
+    pattern_name, matched_text = result
+    if is_suppressed("git_guard", pattern_name=pattern_name):
+        log_security_event(
+            "git_guard", "allow",
+            pattern_matched=pattern_name, command=command,
+            extra={"suppressed": True},
+        )
+        return None
+
+    decision = "deny" if pattern_name in GIT_HARD_DENY else "ask"
+    log_security_event(
+        "git_guard", decision,
+        pattern_matched=pattern_name, command=command,
+    )
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+            "permissionDecisionReason": git_format(pattern_name, matched_text),
+        },
+    }
+
+
+def run_credential_access_guard(command: str) -> dict[str, object] | None:
+    """Run credential-file read guard checks. Returns response dict or None."""
+    result = cred_access_check(command)
+    if result is None:
+        return None
+
+    pattern_name, matched_text = result
+    if is_suppressed("credential_access_guard", pattern_name=pattern_name):
+        log_security_event(
+            "credential_access_guard", "allow",
+            pattern_matched=pattern_name, command=command,
+            extra={"suppressed": True},
+        )
+        return None
+
+    decision = "deny" if pattern_name in CRED_ACCESS_HARD_DENY else "ask"
+    log_security_event(
+        "credential_access_guard", decision,
+        pattern_matched=pattern_name, command=command,
+    )
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+            "permissionDecisionReason": cred_access_format(
+                pattern_name, matched_text
+            ),
+        },
+    }
 
 
 def _pick_highest(
@@ -163,8 +225,13 @@ def main() -> None:
 
     exfil_result = run_exfil_guard(command)
     supply_result = run_supply_chain_guard(command)
+    git_result = run_git_guard(command)
+    cred_result = run_credential_access_guard(command)
 
-    winner = _pick_highest(exfil_result, supply_result)
+    winner = _pick_highest(
+        _pick_highest(_pick_highest(exfil_result, supply_result), git_result),
+        cred_result,
+    )
     if winner:
         json.dump(winner, sys.stdout)
         return

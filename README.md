@@ -48,15 +48,19 @@ Claude Code plugin that hardens your instance with layered, defense-in-depth sec
 |------|-------|---------|----------|
 | Container-First | PreToolUse | Bash | Blocks rm -rf, obfuscation, escape techniques (nsenter/ptrace), kernel manipulation. Asks before over-privileged containers. Enforces container isolation for package installs and interpreters |
 | Sigma Engine | PreToolUse | Bash | Evaluates commands against ~100+ SigmaHQ process_creation rules (Linux/macOS, medium+ severity) |
-| Security Dispatcher | PreToolUse | Bash | Exfiltration detection (ngrok, netcat, data POST) + supply chain guard (typosquats, pipe-to-shell, unsafe installs) |
+| Security Dispatcher | PreToolUse | Bash | Exfiltration detection (ngrok, netcat, reverse shell via `/dev/tcp`, data POST, DNS-label exfil, cloud-metadata SSRF, scp/rsync/sftp to remote, curl upload, push-to-URL) + supply chain guard (typosquats, fetch-to-shell via pipe / `$(...)` / `<(...)`, unsafe installs) + git guard (recursive submodule clones and `submodule update --init` per CVE-2024-32002 / CVE-2025-48384, `git config` / `-c` / `--config` RCE primitives, `GIT_*` env RCE, `.git/hooks` and `.git/config` writes) + credential-file read guard (asks before `cat`/`head`/`bat`/`strings`/`xxd` of `.env`, `~/.ssh`, `~/.aws`, `.npmrc`, keychains, ...) |
 | Credential Guard | PreToolUse | Write / Edit | Detects API keys, tokens, private keys, and passwords in file writes |
-| MCP Guard | PreToolUse | mcp__.\* | Detects credential/exfil patterns in MCP tool arguments (network-capable tools only) |
+| MCP Guard | PreToolUse | mcp__.\* | Detects credential/exfil patterns in MCP tool arguments. Scans every `mcp__*` tool by default (any server can be an exfil channel); the network-capable prefix list is a severity hint, not the scan gate |
 | Agent Guard | PreToolUse | Agent | Enforces least-privilege agent spawning: blocks credential leakage, detects prompt injection, dangerous modes, excessive privilege, sensitive paths, prompt size. Injects security constraints into subagent prompts. Rate-limits spawns |
-| Output Credential Scanner | PostToolUse | Bash | Scans command output for leaked credentials. Redacts high-confidence matches (AWS, GitHub, Anthropic keys, private keys). Warns on low-confidence. Skips safe commands and intentional credential searches |
-| Injection Defense | PostToolUse | Read | Detects indirect prompt injection in file contents: role manipulation, fake system tags, instruction overrides, fake approvals, unicode/zero-width chars, hidden HTML directives. Warns Claude to treat file instructions as data |
-| Subagent Stop Guard | SubagentStop | — | Validates subagent output before parent trusts it: blocks credential leaks, detects injection targeting parent, embedded commands, exfiltration staging |
+| WebFetch Guard | PreToolUse | WebFetch | Inspects the outbound URL before the fetch leaves the host. Denies known exfil/tunneling domains (ngrok, webhook.site, interact.sh, ...); asks on embedded credentials, base64/hex blobs, sensitive-keyword params, or overlong values in the query string |
+| Output Credential Scanner | PostToolUse | Bash | Scans command output for leaked credentials. Redacts high-confidence matches (AWS `AKIA`/`ASIA`, GitHub `ghp_`/`gho_`/`ghs_`, GitLab `glpat-`, npm, Anthropic keys, private keys). Warns on low-confidence. Scans `head`/`tail` output; skips other safe commands and intentional credential searches |
+| Injection Defense | PostToolUse | Read | Detects indirect prompt injection in file contents: role manipulation, fake system tags, instruction overrides, fake approvals, unicode/zero-width chars, hidden HTML directives, AI-addressed text, fake conversations, prompt-extraction, mode-escalation. Warns Claude to treat file instructions as data |
+| Subagent Stop Guard | SubagentStop | — | Validates subagent output before parent trusts it: credential leaks, injection targeting parent, embedded commands, exfiltration staging. Emits a Stop-family `{"decision":"block"}` so the reason is fed back to the parent |
+| Agent Output Guard | PostToolUse | Agent \| SendMessage | Scans a subagent's returned text and inter-agent SendMessage payloads for parent-targeting injection, leaked credentials, embedded commands, and exfiltration staging; warns the parent (systemMessage) to treat the output as untrusted data |
 | Prompt Credential Guard | UserPromptSubmit | — | Blocks private keys pasted into chat. Warns Claude not to echo high-confidence API tokens. Suggests environment variable alternatives |
 | Sigma Update | SessionStart | — | Auto-updates SigmaHQ rules (24h cooldown) |
+| Session Baseline | SessionStart / PreCompact | — | Re-injects the security baseline (TIER 0-3 instruction hierarchy) at every session start, so it survives compaction (SessionStart fires on the `compact` trigger). On PreCompact, logs the compaction event (non-blocking, never blocks compaction) |
+| Session Cleanup | SessionEnd | — | Removes this session's agent-spawn state and sweeps stale spawn files (>24h) left by crashed sessions |
 | Stop Checklist | Stop | — | Security hygiene reminder at session end (secrets, containers, temp files) |
 
 ### Skill: `/portcullis:harden`
@@ -105,8 +109,8 @@ This creates a Python venv for the sigma compiler and clones SigmaHQ rules. With
 
 ### Decision model
 
-- **deny** — Zero-FP patterns hard-block without user prompt (exfil domains, netcat, pipe-to-shell, rm -rf, obfuscation, escape techniques, kernel manipulation, high-confidence credentials in agent prompts, spawn rate limit exceeded)
-- **ask** — User must explicitly approve (data POST, typosquats, dangerous installs, credential patterns, over-privileged containers, host package installs, agent prompt injection, dangerous agent modes, excessive privilege, sensitive paths, subagent output anomalies)
+- **deny** — Zero-FP patterns hard-block without user prompt (exfil domains, netcat, reverse shell via `/dev/tcp`, fetch-to-shell via pipe / `$(...)` / `<(...)`, rm -rf, hex/octal-escape obfuscation, escape techniques, kernel manipulation, high-confidence credentials in agent prompts, spawn rate limit exceeded)
+- **ask** — User must explicitly approve (data POST, DNS-label exfil, cloud-metadata SSRF, scp/rsync/sftp to remote, curl upload, git push to a URL, typosquats, dangerous installs, download-then-run, credential patterns, reading a credential file (`.env`, `~/.ssh`, `~/.aws`, keychains, ...), over-privileged containers, host package installs, recursive submodule clones and `submodule update --init`, git config RCE primitives (`core.hooksPath` / `core.sshCommand` / `credential.helper` / ...), `GIT_*` env RCE, `.git/hooks` and `.git/config` writes, agent prompt injection, dangerous agent modes, excessive privilege, sensitive paths, subagent output anomalies)
 - **redact** — Credential values replaced in-place with `[REDACTED: pattern_name]` in command output (high-confidence only, preserves surrounding context)
 - **warn (systemMessage)** — Context injected for Claude: credential handling reminders, prompt injection warnings on file reads, low-confidence pattern alerts
 - **allow + context** — Soft reminder shown to Claude (interpreter on host, container suggestion, security constraints injected into subagent prompts)
@@ -115,11 +119,13 @@ This creates a Python venv for the sigma compiler and clones SigmaHQ rules. With
 
 | Event | When it fires | What Portcullis does |
 |-------|---------------|----------------------|
-| PreToolUse | Before any tool executes | Gates dangerous commands, file writes, MCP calls, agent spawns |
-| PostToolUse | After a tool returns output | Scans Bash output for credential leaks, Read output for injection |
+| PreToolUse | Before any tool executes | Gates dangerous commands, file writes, MCP calls, agent spawns, outbound WebFetch URLs |
+| PostToolUse | After a tool returns output | Scans Bash output for credential leaks, Read output for injection, Agent/SendMessage output for parent-targeting injection |
 | UserPromptSubmit | When user sends a message | Catches pasted credentials before they enter conversation |
 | SubagentStop | When a subagent completes | Validates output before parent acts on it |
-| SessionStart | Session begins | Updates sigma rule database (24h cooldown) |
+| SessionStart | Session begins (incl. after compaction) | Updates sigma rule database (24h cooldown); re-injects the security baseline |
+| PreCompact | Before a manual or auto compaction | Logs the compaction event (non-blocking) |
+| SessionEnd | Session ends | Cleans up per-session agent-spawn state |
 | Stop | Session ends | Security hygiene checklist reminder |
 
 ### Hooks vs. CLAUDE.md rules
@@ -154,19 +160,25 @@ hooks/sigma_update.sh                Auto-updates rules on session start
 hooks/security_dispatcher.py         Exfil + supply chain consolidated dispatcher
 hooks/exfil_guard.py                 Data exfiltration pattern detection
 hooks/supply_chain_guard.py          Typosquat + dangerous install detection
+hooks/git_guard.py                   Git clone-time RCE + config-hijack detection (via dispatcher)
+hooks/credential_access_guard.py     Credential-file read pre-block (via dispatcher)
 hooks/credential_guard.py            Credential leak detection in file writes
 hooks/mcp_guard.py                   MCP tool argument monitoring
 hooks/agent_guard.py                 Agent spawn security guard (PreToolUse)
+hooks/webfetch_guard.py              Outbound WebFetch URL guard (PreToolUse)
 hooks/subagent_stop_guard.py         Subagent output validation (SubagentStop)
+hooks/agent_output_guard.py          Inter-agent output scan (PostToolUse[Agent|SendMessage])
 hooks/output_credential_scanner.py   Bash output credential scanner (PostToolUse)
 hooks/injection_defense.py           Indirect prompt injection defense (PostToolUse)
 hooks/prompt_credential_guard.py     User prompt credential paste detection (UserPromptSubmit)
+hooks/session_baseline.py            Security-baseline re-injection (SessionStart) + compaction audit (PreCompact)
+hooks/session_cleanup.py             Per-session state cleanup (SessionEnd)
 hooks/stop_checklist.py              Security completion checklist at session end
 hooks/hook_logging.py                Shared logging (macOS Unified Log + syslog + file)
 hooks/allowlist.py                   Per-project suppression via .claude/hook-allowlist.json
 scripts/install.sh                   Post-install setup (venv + sigma compilation)
 scripts/uninstall.sh                 Cleanup (removes venv + compiled rules)
-tests/test_plugin.py                 Integration tests (41 test assertions)
+tests/test_plugin.py                 Integration tests (239 assertions)
 tests/test_sigma_engine.py            Sigma engine test suite
 ```
 

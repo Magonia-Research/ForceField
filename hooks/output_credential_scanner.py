@@ -17,17 +17,18 @@ import re
 import sys
 from pathlib import Path
 
-MAX_STDIN_BYTES = 1_048_576
 MAX_SCAN_BYTES = 102_400
 
 sys.path.insert(0, str(Path(__file__).parent))
+from patterns import MAX_STDIN_BYTES  # noqa: E402
 from credential_guard import CREDENTIAL_PATTERNS, is_fake_value  # noqa: E402
 from allowlist import is_suppressed  # noqa: E402
 from hook_logging import log_security_event  # noqa: E402
 
 HIGH_CONFIDENCE = frozenset([
-    "aws_access_key", "anthropic_key", "github_token",
-    "github_fine_grained", "private_key_header", "slack_token",
+    "aws_access_key", "aws_sts_key", "anthropic_key", "github_token",
+    "github_oauth_token", "github_server_token", "github_fine_grained",
+    "gitlab_token", "npm_token", "private_key_header", "slack_token",
     "stripe_key",
 ])
 
@@ -35,9 +36,11 @@ LOW_CONFIDENCE = frozenset([
     "openai_key", "jwt_token", "generic_secret", "password_assignment",
 ])
 
+# head/tail are intentionally NOT here: they are common ways to read a
+# credential file, so their output must still be scanned for secrets.
 SAFE_SIMPLE_COMMANDS = re.compile(
     r"^\s*(git\s+(log|diff|status|show|branch|remote|tag|rev-parse|blame)"
-    r"|ls\b|find\s|wc\s|head\s|tail\s|pwd|which\s|type\s"
+    r"|ls\b|find\s|wc\s|pwd|which\s|type\s"
     r"|mkdir\s|mv\s|cp\s|trash\s|stat\s|file\s|diff\s)"
 )
 
@@ -60,8 +63,9 @@ def is_credential_search(command: str) -> bool:
 
 
 PATTERN_PRIORITY = [
-    "anthropic_key", "aws_access_key", "aws_secret_key",
-    "github_token", "github_fine_grained", "private_key_header",
+    "anthropic_key", "aws_access_key", "aws_sts_key", "aws_secret_key",
+    "github_token", "github_oauth_token", "github_server_token",
+    "github_fine_grained", "gitlab_token", "npm_token", "private_key_header",
     "slack_token", "stripe_key",
     "openai_key", "jwt_token", "generic_secret", "password_assignment",
 ]

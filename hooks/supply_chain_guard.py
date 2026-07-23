@@ -1,25 +1,15 @@
 #!/usr/bin/env python3
-"""Supply chain guard hook for Claude Code.
+"""Supply chain guard for Claude Code Bash commands.
 
-Detects typosquatting and dangerous package install patterns.
-Returns "ask" so the user can approve or deny.
-
-Input: JSON on stdin (Claude Code PreToolUse hook format)
-Output: JSON on stdout (hook response)
+Detects typosquatting and dangerous package-install patterns, returning "ask"
+(or "deny" for the zero-false-positive patterns). Imported by
+``security_dispatcher``, which owns the stdin/stdout plumbing, allowlist
+suppression, and logging.
 """
 
 from __future__ import annotations
 
-import json
 import re
-import sys
-from pathlib import Path
-
-MAX_STDIN_BYTES = 1_048_576  # 1 MiB guard against oversized input
-
-sys.path.insert(0, str(Path(__file__).parent))
-from allowlist import is_suppressed  # noqa: E402
-from hook_logging import log_security_event  # noqa: E402
 
 
 def damerau_levenshtein(s: str, t: str) -> int:
@@ -153,10 +143,26 @@ TYPOSQUAT_CHECKS: list[tuple[re.Pattern[str], list[tuple[re.Pattern[str], str]]]
     ]),
 ]
 
+# Fetchers and interpreters shared by the fetch-execute detectors below.
+_FETCHER = r"(?:curl|wget|fetch|aria2c)"
+_INTERP = (
+    r"(?:bash|sh|zsh|dash|ash|ksh|/bin/(?:ba)?sh|python[23]?|python|ruby|perl"
+    r"|node|deno|php|pwsh|powershell|eval)"
+)
+
 DANGEROUS_INSTALL = {
     "pipe_to_shell": re.compile(
-        r"(curl|wget)\s+.*\|\s*(sudo\s+)?"
-        r"(bash|sh|zsh|dash|python[23]?|ruby|perl|/bin/sh|/bin/bash)"
+        r"" + _FETCHER + r"\b[^\n]*\|\s*(?:sudo\s+|env\s+|xargs\s+)*" + _INTERP + r"\b"
+    ),
+    "fetch_exec_substitution": re.compile(
+        # an interpreter executing the output of a fetch via $(...) or <(...):
+        # bash -c "$(curl ...)", source <(curl ...), python3 -c "$(wget ...)"
+        r"(?:" + _INTERP + r"|source)\b[^\n]*(?:\$\(|<\()\s*[^\n)]*"
+        r"\b" + _FETCHER + r"\b"
+    ),
+    "fetch_then_exec": re.compile(
+        # download to a file, then run that file in the same command chain
+        r"" + _FETCHER + r"\b[^\n]*\s-[oO]\b[^\n]*&&[^\n]*(?:" + _INTERP + r"|source)\b"
     ),
     "pip_url_install": re.compile(
         r"pip3?\s+install\s+https?://"
@@ -286,6 +292,7 @@ def check_typosquat(command: str) -> tuple[str, str, str] | None:
 
 HARD_DENY_PATTERNS: frozenset[str] = frozenset([
     "pipe_to_shell",
+    "fetch_exec_substitution",
 ])
 
 
@@ -300,6 +307,8 @@ def check_dangerous(command: str) -> tuple[str, str] | None:
 
 DANGER_DESCRIPTIONS = {
     "pipe_to_shell": "Piping remote script directly to shell",
+    "fetch_exec_substitution": "Executing fetched content via command/process substitution",
+    "fetch_then_exec": "Downloading a script to a file and running it in one step",
     "pip_url_install": "Installing Python package from arbitrary URL",
     "npm_url_install": "Installing npm package from arbitrary URL",
     "npx_url_exec": "Executing package from arbitrary URL via npx/bunx",
@@ -312,6 +321,8 @@ DANGER_DESCRIPTIONS = {
 
 DANGER_ALTERNATIVES = {
     "pipe_to_shell": "Download first, inspect, then run: curl -o script.sh URL && cat script.sh && bash script.sh",
+    "fetch_exec_substitution": "Download to a file, read it, then run it — never execute a fetch inline via $(...) or <(...)",
+    "fetch_then_exec": "Inspect the downloaded file before running it: curl -o s.sh URL && cat s.sh && bash s.sh",
     "pip_url_install": "Use a requirements file with hashes: uv pip install --require-hashes -r requirements.txt",
     "npm_url_install": "Add to package.json and audit: pnpm add <pkg> && pnpm audit",
     "npx_url_exec": "Install the package first with pnpm add, then run locally",
@@ -348,97 +359,3 @@ def format_danger_alert(pattern_name: str, matched_text: str) -> str:
     msg += "- Could this install malicious code?\n"
     msg += f"- Safer alternative: {alt}"
     return msg
-
-
-def main() -> None:
-    """Entry point: read stdin, check for supply-chain threats."""
-    try:
-        raw = sys.stdin.read(MAX_STDIN_BYTES)
-        input_data = json.loads(raw)
-    except (json.JSONDecodeError, OSError, ValueError):
-        json.dump({}, sys.stdout)
-        return
-
-    tool_input = input_data.get("tool_input", {})
-    command = tool_input.get("command", "")
-
-    if not command:
-        json.dump({}, sys.stdout)
-        return
-
-    typo_result = check_typosquat(command)
-    if typo_result:
-        typo, correct, installer = typo_result
-        pattern_key = f"typosquat:{typo}"
-        if is_suppressed("supply_chain_guard", pattern_name=pattern_key):
-            log_security_event(
-                "supply_chain_guard", "allow",
-                pattern_matched=pattern_key, command=command,
-                extra={"suppressed": True},
-            )
-            json.dump({}, sys.stdout)
-            return
-        log_security_event(
-            "supply_chain_guard", "ask",
-            pattern_matched=pattern_key,
-            command=command,
-        )
-        response = {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "ask",
-                "permissionDecisionReason": format_typosquat_alert(
-                    typo, correct, installer
-                ),
-            },
-        }
-        json.dump(response, sys.stdout)
-        return
-
-    if is_allowlisted(command):
-        log_security_event(
-            "supply_chain_guard", "allow", command=command,
-        )
-        json.dump({}, sys.stdout)
-        return
-
-    danger_result = check_dangerous(command)
-    if danger_result:
-        pattern_name, matched_text = danger_result
-        if is_suppressed("supply_chain_guard", pattern_name=pattern_name):
-            log_security_event(
-                "supply_chain_guard", "allow",
-                pattern_matched=pattern_name, command=command,
-                extra={"suppressed": True},
-            )
-            json.dump({}, sys.stdout)
-            return
-        decision = "deny" if pattern_name in HARD_DENY_PATTERNS else "ask"
-        log_security_event(
-            "supply_chain_guard", decision,
-            pattern_matched=pattern_name,
-            command=command,
-        )
-        response = {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": decision,
-                "permissionDecisionReason": format_danger_alert(
-                    pattern_name, matched_text
-                ),
-            },
-        }
-        json.dump(response, sys.stdout)
-        return
-
-    log_security_event(
-        "supply_chain_guard", "allow", command=command,
-    )
-    json.dump({}, sys.stdout)
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        json.dump({}, sys.stdout)
