@@ -5,7 +5,8 @@ Plain executable assert script, like test_plugin.py: runs top to bottom, stops a
 the first failed assert. Exercises the clamp ladder, the full-strength default,
 preset resolution, per-guard overrides, the natural-max cap, the Sigma severity
 floor, every fail-open path, and the two-source trust model (untrusted project
-file vs trusted home file).
+file vs trusted home file). Config governs only the ten enforcement guards; the
+advisory/output guards are always-on and not represented here.
 
 The home file (~/.claude/portcullis.json) is pinned to an in-memory value via
 ``config._home_cache`` so a real home config on the test machine cannot leak in.
@@ -70,22 +71,19 @@ check(config.clamp("deny", "deny") == "deny", "equal ceiling is identity")
 check(config.clamp("deny", "off") == "off", "off ceiling suppresses deny")
 check(config.clamp("warn", "off") == "off", "off ceiling suppresses warn")
 check(config.clamp("allow", "deny") == "allow", "already below ceiling stays")
-check(config.clamp("redact", "warn") == "warn", "redact downgraded to warn")
-check(config.clamp("redact", "redact") == "redact", "redact identity")
-check(config.clamp("redact", "ask") == "redact", "redact ranks below ask")
-check(config.clamp("ask", "redact") == "redact", "ask downgraded to redact")
 check(config.clamp("deny", "bogus") == "deny", "unknown ceiling -> unchanged")
 check(config.clamp("mystery", "ask") == "mystery", "unknown decision -> unchanged")
 
-# --- no file == full strength (each guard at its natural max) ---
+# --- no file == full strength (each enforcement guard at its natural max) ---
 with project(None):
     check(config.resolve_ceiling("exfil_guard") == "deny", "default exfil deny")
     check(config.resolve_ceiling("supply_chain_guard") == "deny", "default supply deny (shipped)")
-    check(config.resolve_ceiling("sigma_engine") == "deny", "default sigma deny (real emit)")
+    check(config.resolve_ceiling("container_first") == "deny", "default container deny")
+    check(config.resolve_ceiling("webfetch_guard") == "deny", "default webfetch deny")
+    check(config.resolve_ceiling("agent_guard") == "deny", "default agent deny")
     check(config.resolve_ceiling("git_guard") == "ask", "default git ask")
     check(config.resolve_ceiling("credential_guard") == "ask", "default credential_guard ask")
     check(config.resolve_ceiling("filesystem_guard") == "ask", "default filesystem ask")
-    check(config.resolve_ceiling("subagent_stop_guard") == "deny", "default subagent_stop deny")
     check(config.effective_decision("supply_chain_guard", "deny") == "deny", "default supply hard-deny preserved")
     check(config.resolve_severity_floor("sigma_engine") == "medium", "default sigma floor medium")
     check(config.effective_decision("some_future_guard", "deny") == "deny", "unknown guard no-op ceiling")
@@ -93,25 +91,20 @@ with project(None):
 # --- strict preset == full-strength default ---
 with project({"preset": "strict"}):
     check(config.resolve_ceiling("supply_chain_guard") == "deny", "strict supply deny")
-    check(config.resolve_ceiling("credential_guard") == "ask", "strict credential_guard ask")
+    check(config.resolve_ceiling("webfetch_guard") == "deny", "strict webfetch deny")
     check(config.resolve_ceiling("exfil_guard") == "deny", "strict exfil deny")
     check(config.resolve_severity_floor("sigma_engine") == "low", "strict sigma floor low")
 
-# --- balanced from a PROJECT (untrusted) file: softens to ask; sub-ask floored ---
+# --- balanced: softens the two highest-FP blocking guards to ask ---
 with project({"preset": "balanced"}):
     check(config.resolve_ceiling("supply_chain_guard") == "ask", "balanced softens supply to ask")
-    check(config.resolve_ceiling("sigma_engine") == "ask", "project balanced sigma floored to ask (not warn)")
+    check(config.resolve_ceiling("webfetch_guard") == "ask", "balanced softens webfetch to ask")
     check(config.resolve_ceiling("exfil_guard") == "deny", "balanced keeps exfil deny")
+    check(config.resolve_ceiling("container_first") == "deny", "balanced keeps container deny")
     check(config.effective_decision("supply_chain_guard", "deny") == "ask", "balanced supply effective ask")
     check(config.resolve_severity_floor("sigma_engine") == "medium", "balanced sigma floor medium")
 
-# --- balanced from HOME (trusted): full softening, incl sub-ask sigma -> warn ---
-with project(None):
-    config._home_cache = {"preset": "balanced"}
-    check(config.resolve_ceiling("sigma_engine") == "warn", "home balanced softens sigma to warn")
-    check(config.resolve_ceiling("supply_chain_guard") == "ask", "home balanced supply ask")
-
-# --- permissive: deny -> ask, nothing disabled ---
+# --- permissive: prompt for everything, block nothing; disables nothing ---
 with project({"preset": "permissive"}):
     check(config.resolve_ceiling("exfil_guard") == "ask", "permissive exfil ask")
     check(config.resolve_ceiling("container_first") == "ask", "permissive container ask")
@@ -120,41 +113,22 @@ with project({"preset": "permissive"}):
     check(config.resolve_severity_floor("sigma_engine") == "high", "permissive sigma floor high")
     check(all(m != "off" for m in config.PRESETS["permissive"].values()), "permissive disables nothing")
 
-# --- untrusted (project) config: blocking guards floored at ask, never off ---
+# --- untrusted (project) config: floored at ask, never off/allow/warn ---
 with project({"guards": {"webfetch_guard": {"mode": "off"}}}):
     check(config.resolve_ceiling("webfetch_guard") == "ask", "repo cannot disable webfetch, floored to ask")
     check(config.effective_decision("webfetch_guard", "deny") == "ask", "repo webfetch effective ask")
     check(config.resolve_ceiling("exfil_guard") == "deny", "other guards unaffected by override")
 
-with project({"guards": {"exfil_guard": {"mode": "allow"}, "sigma_engine": {"mode": "off"}}}):
+with project({"guards": {"exfil_guard": {"mode": "allow"}, "container_first": {"mode": "off"}}}):
     check(config.resolve_ceiling("exfil_guard") == "ask", "repo cannot allow exfil, floored to ask")
-    check(config.resolve_ceiling("sigma_engine") == "ask", "repo cannot disable sigma, floored to ask")
+    check(config.resolve_ceiling("container_first") == "ask", "repo cannot disable container_first, floored to ask")
 
-# --- untrusted (project) config: block-only guards cannot be softened at all ---
-with project({"guards": {"subagent_stop_guard": {"mode": "off"}, "prompt_credential_guard": {"mode": "ask"}}}):
-    check(config.resolve_ceiling("subagent_stop_guard") == "deny", "repo cannot soften block-only subagent_stop")
-    check(config.resolve_ceiling("prompt_credential_guard") == "deny", "repo cannot soften block-only prompt_credential")
-
-# --- untrusted (project) config: advisory guards MAY be fully disabled ---
-with project({"guards": {"injection_defense": {"mode": "off"}, "agent_output_guard": {"mode": "off"}}}):
-    check(config.resolve_ceiling("injection_defense") == "off", "repo may disable advisory injection_defense")
-    check(config.resolve_ceiling("agent_output_guard") == "off", "repo may disable advisory agent_output")
-    check(config.effective_decision("injection_defense", "warn") == "off", "advisory disabled -> off")
-
-with project({"guards": {"output_credential_scanner": {"mode": "warn"}}}):
-    check(config.resolve_ceiling("output_credential_scanner") == "warn", "repo may lower output scanner to warn")
-
-# --- trusted (home) config: may fully disable ANY guard, blocking or block-only ---
+# --- trusted (home) config: may fully disable any guard ---
 with project(None):
-    config._home_cache = {"guards": {
-        "webfetch_guard": {"mode": "off"},
-        "exfil_guard": {"mode": "allow"},
-        "subagent_stop_guard": {"mode": "off"},
-    }}
+    config._home_cache = {"guards": {"webfetch_guard": {"mode": "off"}, "exfil_guard": {"mode": "allow"}}}
     check(config.resolve_ceiling("webfetch_guard") == "off", "home may fully disable webfetch")
     check(config.effective_decision("webfetch_guard", "deny") == "off", "home webfetch effective off")
     check(config.resolve_ceiling("exfil_guard") == "allow", "home may allow exfil")
-    check(config.resolve_ceiling("subagent_stop_guard") == "off", "home may disable block-only subagent_stop")
 
 # --- home cap: cannot exceed natural max even from the trusted file ---
 with project(None):
@@ -188,7 +162,7 @@ with project({"guards": {"git_guard": {"mode": "deny"}}}):
     check(config.resolve_ceiling("git_guard") == "ask", "deny override on ask-only guard capped to ask")
     check(config.effective_decision("git_guard", "ask") == "ask", "capped override yields ask")
 
-# --- sigma severity_floor override (advisory knob: project may set it) ---
+# --- sigma severity_floor override (sigma decision is always-on; floor is tunable) ---
 with project({"preset": "balanced", "guards": {"sigma_engine": {"severity_floor": "high"}}}):
     check(config.resolve_severity_floor("sigma_engine") == "high", "floor override wins")
 

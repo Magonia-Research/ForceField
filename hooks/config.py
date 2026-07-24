@@ -10,6 +10,17 @@ Because ``clamp`` is downgrade-only, config can only ever *loosen* a guard, neve
 fabricate a stricter block. This keeps Portcullis' zero-false-positive-deny
 guarantee intact through configuration.
 
+Scope: the enforcement guards
+-----------------------------
+
+Config governs the ten guards that gate a tool call (Bash / Write / Read /
+WebFetch / MCP / Agent) -- the ones that create friction worth tuning. The
+advisory and output guards (injection_defense, agent_output_guard,
+output_credential_scanner, the prompt/subagent credential guards, sigma_engine)
+are intentionally always-on and NOT configurable here: they warn or redact
+rather than block, so there is no friction to relax, and a repo should never be
+able to silence a security warning or secret redaction.
+
 Default is full strength
 ------------------------
 
@@ -23,18 +34,17 @@ Two sources, separated by trust
 
 * ``~/.claude/portcullis.json`` -- the machine owner's HOME config. **Trusted:**
   only the user can write their home directory. It may loosen any guard to any
-  rung, including fully disabling a blocking guard (``allow`` / ``off``). It may
-  scope overrides to specific projects with a ``"projects"`` map keyed by an
-  absolute path prefix, so "disable webfetch for /path/to/foo" lives here.
+  rung, including fully disabling one (``allow`` / ``off``). It may scope
+  overrides to specific projects with a ``"projects"`` map keyed by an absolute
+  path prefix, so "disable webfetch for /path/to/foo" lives here.
 
 * ``<cwd>/.claude/portcullis.json`` -- the PROJECT config. **Untrusted:** the cwd
   is a possibly-hostile repo under Portcullis' threat model, so this file may be
-  shipped by the very code the guards defend against. It may fully disable an
-  *advisory* guard, but a *blocking* guard can only be softened to ``ask`` (and a
-  block-only guard not at all). This mirrors ``allowlist.py``'s
-  ``_NEVER_SUPPRESSIBLE`` lock: a cloned repo cannot blind the guard standing
-  between it and exfiltration. To fully disable a blocking guard for a project,
-  put it in your HOME config (optionally under ``projects``).
+  shipped by the very code the guards defend against. It may soften a guard only
+  to ``ask`` -- never to ``warn`` / ``allow`` / ``off``. This mirrors
+  ``allowlist.py``'s ``_NEVER_SUPPRESSIBLE`` lock: a cloned repo cannot blind the
+  guard standing between it and exfiltration. To fully disable a guard for a
+  project, put it in your HOME config (optionally under ``projects``).
 
 Schema (both files share it; ``projects`` is honored in the HOME file only)::
 
@@ -70,70 +80,35 @@ from typing import Any
 _MAX_CONFIG_BYTES = 65_536  # 64 KiB — the config should be tiny
 
 # Severity/intrusiveness ladder used only for clamping. A higher rank is stricter.
-# `redact` (output scanners) sits above `warn` and below `ask`: it silently
-# rewrites output rather than interrupting, so it is less intrusive than a prompt.
+# `redact` sits above `warn` and below `ask`; kept in the ladder so a guard's own
+# novel decision clamps sanely, even though no enforcement guard emits it.
 _RANK = {"off": 0, "allow": 1, "warn": 2, "redact": 3, "ask": 4, "deny": 5}
 
-# Each guard's inherent maximum decision == the strictest thing it actually emits
-# (verified 2026-07-24 against the guard source). This is the no-config default:
-# resolve_ceiling starts here, so an unconfigured guard is never downgraded. The
-# cap also lets a too-loud override be a harmless no-op.
+# Each enforcement guard's inherent maximum decision == the strictest thing it
+# actually emits (verified 2026-07-24 against the guard source). This is the
+# no-config default: resolve_ceiling starts here, so an unconfigured guard is
+# never downgraded. The cap also lets a too-loud override be a harmless no-op.
+# A guard NOT listed here is not config-governed (it is always-on).
 NATURAL_MAX = {
-    "container_first": "deny",            # container_first.sh blocks (exit 2)
-    "sigma_engine": "deny",               # emits permissionDecision "deny" on match
-    "exfil_guard": "deny",                # HARD_DENY_PATTERNS non-empty
-    "supply_chain_guard": "deny",         # HARD_DENY_PATTERNS non-empty
-    "git_guard": "ask",                   # HARD_DENY_PATTERNS empty
-    "credential_access_guard": "ask",     # HARD_DENY_PATTERNS empty
-    "credential_guard": "ask",            # emits only "ask"
-    "mcp_guard": "ask",                   # emits only "ask"
-    "agent_guard": "deny",                # emits "deny" for high-confidence
-    "webfetch_guard": "deny",             # HARD_DENY_PATTERNS = {"exfil_domain"}
-    "filesystem_guard": "ask",            # HARD_DENY_PATTERNS empty
-    "injection_defense": "warn",          # PostToolUse systemMessage, cannot block
-    "prompt_credential_guard": "deny",    # top-level {"decision": "block"}
-    "output_credential_scanner": "redact",  # rewrites output, systemMessage
-    "agent_output_guard": "warn",         # systemMessage to parent, cannot block
-    "subagent_stop_guard": "deny",        # top-level {"decision": "block"}
+    "container_first": "deny",          # container_first.sh blocks (exit 2)
+    "exfil_guard": "deny",              # HARD_DENY_PATTERNS non-empty
+    "supply_chain_guard": "deny",       # HARD_DENY_PATTERNS non-empty
+    "git_guard": "ask",                 # HARD_DENY_PATTERNS empty
+    "credential_access_guard": "ask",   # HARD_DENY_PATTERNS empty
+    "credential_guard": "ask",          # emits only "ask"
+    "mcp_guard": "ask",                 # emits only "ask"
+    "agent_guard": "deny",              # emits "deny" for high-confidence
+    "webfetch_guard": "deny",           # HARD_DENY_PATTERNS = {"exfil_domain"}
+    "filesystem_guard": "ask",          # HARD_DENY_PATTERNS empty
 }
 
-# Blocking guards: an untrusted (repo) config may soften these only to ``ask``,
-# never below. They gate a tool call, so silencing one from a repo-shipped file
-# would let hostile code run unguarded.
-_BLOCKING_GUARDS = frozenset({
-    "container_first",
-    "sigma_engine",
-    "exfil_guard",
-    "supply_chain_guard",
-    "git_guard",
-    "credential_access_guard",
-    "credential_guard",
-    "mcp_guard",
-    "agent_guard",
-    "webfetch_guard",
-    "filesystem_guard",
-})
-
-# Block-only guards emit a top-level ``{"decision": "block"}`` and have no "ask"
-# rung -- softening them below deny just means "do not block". An untrusted config
-# therefore cannot soften them at all (floor == their natural max). The user can
-# still disable them from the trusted HOME config.
-_BLOCK_ONLY_GUARDS = frozenset({
-    "prompt_credential_guard",
-    "subagent_stop_guard",
-})
-
-# Advisory guards (everything not in the two sets above): output redaction,
-# lifecycle and PostToolUse warnings. They never block a tool call, so an
-# untrusted config may lower them freely, including off.
-
 # Preset x guard ceilings. `strict` == NATURAL_MAX by construction (an explicit
-# "full strength", identical to the no-config default). `balanced` and
-# `permissive` are progressively looser and apply only when a config selects them.
+# "full strength", identical to the no-config default). `balanced` softens the
+# two blocking guards with the most false-positive surface; `permissive` prompts
+# for everything and blocks nothing. All values stay <= NATURAL_MAX.
 PRESETS = {
     "strict": {
         "container_first": "deny",
-        "sigma_engine": "deny",
         "exfil_guard": "deny",
         "supply_chain_guard": "deny",
         "git_guard": "ask",
@@ -143,15 +118,9 @@ PRESETS = {
         "agent_guard": "deny",
         "webfetch_guard": "deny",
         "filesystem_guard": "ask",
-        "injection_defense": "warn",
-        "prompt_credential_guard": "deny",
-        "output_credential_scanner": "redact",
-        "agent_output_guard": "warn",
-        "subagent_stop_guard": "deny",
     },
     "balanced": {
         "container_first": "deny",
-        "sigma_engine": "warn",
         "exfil_guard": "deny",
         "supply_chain_guard": "ask",
         "git_guard": "ask",
@@ -159,17 +128,11 @@ PRESETS = {
         "credential_guard": "ask",
         "mcp_guard": "ask",
         "agent_guard": "deny",
-        "webfetch_guard": "deny",
+        "webfetch_guard": "ask",
         "filesystem_guard": "ask",
-        "injection_defense": "warn",
-        "prompt_credential_guard": "deny",
-        "output_credential_scanner": "redact",
-        "agent_output_guard": "warn",
-        "subagent_stop_guard": "deny",
     },
     "permissive": {
         "container_first": "ask",
-        "sigma_engine": "warn",
         "exfil_guard": "ask",
         "supply_chain_guard": "ask",
         "git_guard": "ask",
@@ -179,16 +142,11 @@ PRESETS = {
         "agent_guard": "ask",
         "webfetch_guard": "ask",
         "filesystem_guard": "ask",
-        "injection_defense": "warn",
-        "prompt_credential_guard": "ask",
-        "output_credential_scanner": "warn",
-        "agent_output_guard": "warn",
-        "subagent_stop_guard": "ask",
     },
 }
 
-# Sigma severity floor per preset (only knob beyond `mode`). Lower floor = more
-# rules fire. The no-config default is ``medium``.
+# Sigma severity floor per preset (consumed by sigma_engine's rule loader, which
+# is otherwise always-on). Lower floor = more rules fire. Default is ``medium``.
 _PRESET_SEVERITY_FLOOR = {"strict": "low", "balanced": "medium", "permissive": "high"}
 DEFAULT_SEVERITY_FLOOR = "medium"
 _VALID_FLOORS = frozenset(_PRESET_SEVERITY_FLOOR.values())
@@ -279,18 +237,15 @@ def clamp(decision: str, ceiling: str) -> str:
 
 
 def _floor_untrusted(guard_name: str, ceiling: str) -> str:
-    """Raise an untrusted ceiling back up to the floor its guard class allows.
+    """Raise an untrusted (repo) ceiling back up to ``ask`` for a known guard.
 
-    Blocking guard -> at least ``ask``; block-only guard -> at least its natural
-    max (a repo cannot soften it at all); advisory guard -> unchanged.
+    A repo-shipped config may soften an enforcement guard to a prompt but no
+    further; it can never take one to warn/allow/off. An unknown guard is
+    returned unchanged (config does not govern it anyway).
     """
-    if guard_name in _BLOCK_ONLY_GUARDS:
-        floor = NATURAL_MAX.get(guard_name, "deny")
-    elif guard_name in _BLOCKING_GUARDS:
-        floor = "ask"
-    else:
-        return ceiling
-    return ceiling if _RANK.get(ceiling, 5) >= _RANK[floor] else floor
+    if guard_name in NATURAL_MAX and _RANK.get(ceiling, 5) < _RANK["ask"]:
+        return "ask"
+    return ceiling
 
 
 def _ceiling_from(config: dict[str, Any], guard_name: str) -> str | None:
@@ -341,9 +296,8 @@ def resolve_ceiling(guard_name: str) -> str:
 def resolve_severity_floor(guard_name: str = "sigma_engine") -> str:
     """Resolve the Sigma severity floor (per-guard override else preset default).
 
-    Sigma is advisory for this knob, so both sources may set it; home wins over
-    project, and a per-project home entry wins over the global home value. With no
-    config, returns ``DEFAULT_SEVERITY_FLOOR``.
+    Home wins over project, and a per-project home entry wins over the global home
+    value. With no config, returns ``DEFAULT_SEVERITY_FLOOR``.
     """
     home = _home_config()
     cwd = os.getcwd()
