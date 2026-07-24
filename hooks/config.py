@@ -13,13 +13,15 @@ guarantee intact through configuration.
 Scope: the enforcement guards
 -----------------------------
 
-Config governs the ten guards that gate a tool call (Bash / Write / Read /
-WebFetch / MCP / Agent) -- the ones that create friction worth tuning. The
+Config governs the eleven guards that gate or prompt on a tool call (Bash /
+Write / Read / WebFetch / MCP / Agent) -- the ones that create friction worth
+tuning. That includes ``sigma_engine``, which prompts (``ask``) on a SigmaHQ
+rule match and whose severity floor is separately tunable per preset. The
 advisory and output guards (injection_defense, agent_output_guard,
-output_credential_scanner, the prompt/subagent credential guards, sigma_engine)
-are intentionally always-on and NOT configurable here: they warn or redact
-rather than block, so there is no friction to relax, and a repo should never be
-able to silence a security warning or secret redaction.
+output_credential_scanner, the prompt/subagent credential guards) are
+intentionally always-on and NOT configurable here: they warn or redact rather
+than block, so there is no friction to relax, and a repo should never be able to
+silence a security warning or secret redaction.
 
 Default is full strength
 ------------------------
@@ -100,12 +102,15 @@ NATURAL_MAX = {
     "agent_guard": "deny",              # emits "deny" for high-confidence
     "webfetch_guard": "deny",           # HARD_DENY_PATTERNS = {"exfil_domain"}
     "filesystem_guard": "ask",          # HARD_DENY_PATTERNS empty
+    "sigma_engine": "ask",              # prompts on a SigmaHQ rule match (never deny)
 }
 
 # Preset x guard ceilings. `strict` == NATURAL_MAX by construction (an explicit
 # "full strength", identical to the no-config default). `balanced` softens the
-# two blocking guards with the most false-positive surface; `permissive` prompts
-# for everything and blocks nothing. All values stay <= NATURAL_MAX.
+# highest-false-positive guards -- the two blocking ones to ask, and the
+# heuristic sigma_engine to a non-blocking warn. `permissive` prompts for
+# everything and blocks nothing, except the noisy sigma_engine which it also
+# drops to warn. All values stay <= NATURAL_MAX.
 PRESETS = {
     "strict": {
         "container_first": "deny",
@@ -118,6 +123,7 @@ PRESETS = {
         "agent_guard": "deny",
         "webfetch_guard": "deny",
         "filesystem_guard": "ask",
+        "sigma_engine": "ask",
     },
     "balanced": {
         "container_first": "deny",
@@ -130,6 +136,7 @@ PRESETS = {
         "agent_guard": "deny",
         "webfetch_guard": "ask",
         "filesystem_guard": "ask",
+        "sigma_engine": "warn",
     },
     "permissive": {
         "container_first": "ask",
@@ -142,11 +149,15 @@ PRESETS = {
         "agent_guard": "ask",
         "webfetch_guard": "ask",
         "filesystem_guard": "ask",
+        "sigma_engine": "warn",
     },
 }
 
-# Sigma severity floor per preset (consumed by sigma_engine's rule loader, which
-# is otherwise always-on). Lower floor = more rules fire. Default is ``medium``.
+# Sigma severity floor per preset, consumed by sigma_engine at evaluation time to
+# drop compiled rules below the floor (permissive -> ``high`` quiets the noisiest
+# guard without a recompile). A separate knob from the decision clamp above:
+# the clamp decides deny/ask/warn on a match, the floor decides which rules can
+# match at all. Lower floor = more rules fire. Default is ``medium``.
 _PRESET_SEVERITY_FLOOR = {"strict": "low", "balanced": "medium", "permissive": "high"}
 DEFAULT_SEVERITY_FLOOR = "medium"
 _VALID_FLOORS = frozenset(_PRESET_SEVERITY_FLOOR.values())

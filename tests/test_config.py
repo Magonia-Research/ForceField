@@ -3,10 +3,10 @@
 
 Plain executable assert script, like test_plugin.py: runs top to bottom, stops at
 the first failed assert. Exercises the clamp ladder, the full-strength default,
-preset resolution, per-guard overrides, the natural-max cap, the Sigma severity
-floor, every fail-open path, and the two-source trust model (untrusted project
-file vs trusted home file). Config governs only the ten enforcement guards; the
-advisory/output guards are always-on and not represented here.
+preset resolution, per-guard overrides, the natural-max cap, the Sigma decision
+clamp and severity floor, every fail-open path, and the two-source trust model
+(untrusted project file vs trusted home file). Config governs only the eleven
+enforcement guards; the advisory/output guards are always-on and not here.
 
 The home file (~/.claude/portcullis.json) is pinned to an in-memory value via
 ``config._home_cache`` so a real home config on the test machine cannot leak in.
@@ -85,6 +85,8 @@ with project(None):
     check(config.resolve_ceiling("credential_guard") == "ask", "default credential_guard ask")
     check(config.resolve_ceiling("filesystem_guard") == "ask", "default filesystem ask")
     check(config.effective_decision("supply_chain_guard", "deny") == "deny", "default supply hard-deny preserved")
+    check(config.resolve_ceiling("sigma_engine") == "ask", "default sigma decision ask")
+    check(config.effective_decision("sigma_engine", "ask") == "ask", "default sigma effective ask")
     check(config.resolve_severity_floor("sigma_engine") == "medium", "default sigma floor medium")
     check(config.effective_decision("some_future_guard", "deny") == "deny", "unknown guard no-op ceiling")
 
@@ -93,6 +95,7 @@ with project({"preset": "strict"}):
     check(config.resolve_ceiling("supply_chain_guard") == "deny", "strict supply deny")
     check(config.resolve_ceiling("webfetch_guard") == "deny", "strict webfetch deny")
     check(config.resolve_ceiling("exfil_guard") == "deny", "strict exfil deny")
+    check(config.resolve_ceiling("sigma_engine") == "ask", "strict sigma decision ask")
     check(config.resolve_severity_floor("sigma_engine") == "low", "strict sigma floor low")
 
 # --- balanced: softens the two highest-FP blocking guards to ask ---
@@ -102,6 +105,7 @@ with project({"preset": "balanced"}):
     check(config.resolve_ceiling("exfil_guard") == "deny", "balanced keeps exfil deny")
     check(config.resolve_ceiling("container_first") == "deny", "balanced keeps container deny")
     check(config.effective_decision("supply_chain_guard", "deny") == "ask", "balanced supply effective ask")
+    check(config.resolve_ceiling("sigma_engine") == "ask", "balanced sigma warn floored to ask in untrusted project")
     check(config.resolve_severity_floor("sigma_engine") == "medium", "balanced sigma floor medium")
 
 # --- permissive: prompt for everything, block nothing; disables nothing ---
@@ -122,6 +126,18 @@ with project({"guards": {"webfetch_guard": {"mode": "off"}}}):
 with project({"guards": {"exfil_guard": {"mode": "allow"}, "container_first": {"mode": "off"}}}):
     check(config.resolve_ceiling("exfil_guard") == "ask", "repo cannot allow exfil, floored to ask")
     check(config.resolve_ceiling("container_first") == "ask", "repo cannot disable container_first, floored to ask")
+
+with project({"guards": {"sigma_engine": {"mode": "off"}}}):
+    check(config.resolve_ceiling("sigma_engine") == "ask", "repo cannot silence sigma, floored to ask")
+
+# --- sigma decision: a trusted home preset drops the heuristic guard to warn ---
+with project(None):
+    config._home_cache = {"preset": "balanced"}
+    check(config.resolve_ceiling("sigma_engine") == "warn", "home balanced sigma -> warn")
+    check(config.effective_decision("sigma_engine", "ask") == "warn", "home balanced sigma effective warn")
+with project(None):
+    config._home_cache = {"preset": "permissive"}
+    check(config.resolve_ceiling("sigma_engine") == "warn", "home permissive sigma -> warn")
 
 # --- trusted (home) config: may fully disable any guard ---
 with project(None):
@@ -162,7 +178,7 @@ with project({"guards": {"git_guard": {"mode": "deny"}}}):
     check(config.resolve_ceiling("git_guard") == "ask", "deny override on ask-only guard capped to ask")
     check(config.effective_decision("git_guard", "ask") == "ask", "capped override yields ask")
 
-# --- sigma severity_floor override (sigma decision is always-on; floor is tunable) ---
+# --- sigma severity_floor: a separate knob from the decision clamp above ---
 with project({"preset": "balanced", "guards": {"sigma_engine": {"severity_floor": "high"}}}):
     check(config.resolve_severity_floor("sigma_engine") == "high", "floor override wins")
 

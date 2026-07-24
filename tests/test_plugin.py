@@ -74,6 +74,22 @@ assert dec(run_exfil_guard(_EVIL_EXFIL)) == "deny", "default exfil stays deny af
 assert dec(run_supply_chain_guard(_PIPE_SH)) == "deny", "default supply stays deny after clamp tests"
 print("PASS: config clamp downgrades dispatcher decisions via trusted home config")
 
+# --- sigma_engine is tiered-config governed: its natural "ask" is clampable ---
+from hook_logging import clamp_and_emit
+
+
+def _sigma_emit():
+    return clamp_and_emit("sigma_engine", "ask", "matched a Sigma rule", command="x")
+
+
+assert dec(_with_home({}, _sigma_emit)) == "ask", "sigma default decision is ask (not deny)"
+_sigma_warn = _with_home({"preset": "balanced"}, _sigma_emit)
+assert _sigma_warn is not None and "systemMessage" in _sigma_warn and "hookSpecificOutput" not in _sigma_warn, \
+    "home balanced softens sigma ask -> warn (systemMessage only)"
+assert _with_home({"guards": {"sigma_engine": {"mode": "off"}}}, _sigma_emit) is None, \
+    "home off waves a sigma match through"
+print("PASS: sigma_engine decision routes through the tiered-config clamp")
+
 # --- R3 logging format: OTel record + normalized severity + OCSF projection ---
 for _dec, _sevtext, _ocsf in [
     ("deny", "ERROR", 4), ("block", "ERROR", 4), ("redact", "WARN", 3),

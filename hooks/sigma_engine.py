@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Sigma-based security guard hook for Claude Code.
 
-Evaluates Bash commands against compiled Sigma process_creation rules.
-On match, returns "ask" decision so user can approve or deny.
+Evaluates Bash commands against compiled Sigma process_creation rules. On match,
+returns an "ask" decision so the user can approve or deny -- never a hard "deny",
+because SigmaHQ rules are broad heuristics and a hard block on them would break
+Portcullis' zero-false-positive-deny guarantee. The tiered config may downgrade
+the "ask" to a non-blocking "warn" and may raise the severity floor so fewer
+rules fire (see hooks/config.py).
 
 Input: JSON on stdin (Claude Code PreToolUse hook format)
 Output: JSON on stdout (hook response)
@@ -15,7 +19,28 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from hook_logging import clamp_and_emit  # noqa: E402
+
 RULES_PATH = Path(__file__).parent / "sigma_rules.json"
+
+# Severity rank for the runtime floor (higher == more severe). Distinct from the
+# compiler's inverted sort order; used only to drop rules below the config floor.
+_LEVEL_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+
+def _severity_floor_rank():
+    """Runtime Sigma severity floor as a rank; ``medium`` (1) on any error.
+
+    Lets the tiered config quiet Sigma (permissive preset -> ``high``) without a
+    recompile. With no config the floor is ``medium``, so every compiled
+    (medium+) rule stays active and shipped behavior is unchanged.
+    """
+    try:
+        from config import resolve_severity_floor
+        return _LEVEL_RANK.get(resolve_severity_floor("sigma_engine"), 1)
+    except Exception:
+        return 1
 
 
 @lru_cache(maxsize=512)
@@ -296,7 +321,7 @@ def format_alert(rule):
         for t in tags if t in MITRE_TACTIC_NAMES
     ]
 
-    msg = f"BLOCKED: {title}\n\n"
+    msg = f"SECURITY ALERT: {title}\n\n"
     msg += f"Severity: {level.upper()} - {LEVEL_EXPLANATIONS.get(level, '')}\n\n"
 
     msg += "WHY THIS IS SUSPICIOUS:\n"
@@ -341,6 +366,13 @@ def main():
         json.dump({}, sys.stdout)
         return
 
+    floor = _severity_floor_rank()
+    if floor > 1:
+        rules = [r for r in rules if _LEVEL_RANK.get(r.get("level", "low"), 0) >= floor]
+        if not rules:
+            json.dump({}, sys.stdout)
+            return
+
     image = extract_image(command)
 
     matched_rules = []
@@ -357,15 +389,15 @@ def main():
     messages = [format_alert(r) for r in matched_rules]
     combined = "\n\n---\n\n".join(messages)
 
-    response = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": combined,
-        },
-    }
-
-    json.dump(response, sys.stdout)
+    first = matched_rules[0]
+    response = clamp_and_emit(
+        "sigma_engine",
+        "ask",
+        combined,
+        pattern_matched=first.get("id") or first.get("title", "sigma_rule"),
+        command=command,
+    )
+    json.dump(response if response else {}, sys.stdout)
 
 
 if __name__ == "__main__":

@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
-"""Test suite for sigma_engine.py hook."""
+"""Test suite for sigma_engine.py hook.
+
+Runs the repo copy of the hook (not the installed one under ~/.claude). The
+match-expecting cases need hooks/sigma_rules.json, which scripts/install.sh
+compiles and which is gitignored; when it is absent the engine correctly no-ops,
+so those cases are skipped rather than failed while the benign cases still assert
+zero false matches. A fresh checkout is therefore green with or without rules.
+"""
 
 import json
-import os
 import subprocess
 import sys
+from pathlib import Path
 
-GUARD = os.path.expanduser("~/.claude/hooks/sigma_engine.py")
+HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
+GUARD = str(HOOKS_DIR / "sigma_engine.py")
+RULES_PATH = HOOKS_DIR / "sigma_rules.json"
 
 TEST_CASES = [
     # (name, command, should_match)
@@ -62,11 +71,37 @@ def run_guard(command):
         return {}
 
 
+def _reason(output):
+    """Pull the human-readable reason from either hook response shape.
+
+    An ``ask`` uses hookSpecificOutput.permissionDecisionReason; a
+    config-downgraded ``warn`` uses systemMessage.
+    """
+    hso = output.get("hookSpecificOutput")
+    if isinstance(hso, dict) and hso.get("permissionDecisionReason"):
+        return hso["permissionDecisionReason"]
+    return output.get("systemMessage", "")
+
+
 def main():
+    rules_present = RULES_PATH.exists()
+    if not rules_present:
+        print(
+            "  NOTE: hooks/sigma_rules.json absent (run scripts/install.sh to "
+            "compile rules);\n        engine no-ops without rules, so "
+            "match-expecting cases are skipped.\n"
+        )
+
     passed = 0
     failed = 0
+    skipped = 0
 
     for name, cmd, should_match in TEST_CASES:
+        if should_match and not rules_present:
+            skipped += 1
+            print(f"  SKIP [.....] {name:25s} (needs compiled rules)")
+            continue
+
         output = run_guard(cmd)
         matched = bool(output)
 
@@ -83,17 +118,16 @@ def main():
         if status == "FAIL":
             print(f"  {status} [{indicator}] {name:25s} ({expect})")
             if matched:
-                msg = output.get("systemMessage", "")[:100]
-                print(f"        Got: {msg}")
+                print(f"        Got: {_reason(output)[:100]}")
         else:
             detail = ""
             if matched:
-                msg = output.get("systemMessage", "")
-                title_line = msg.split("\n")[0] if msg else ""
+                title_line = _reason(output).split("\n")[0]
                 detail = f" -> {title_line[:50]}"
             print(f"  {status} [{indicator}] {name:25s}{detail}")
 
-    print(f"\n  Results: {passed} passed, {failed} failed out of {len(TEST_CASES)}")
+    total = len(TEST_CASES)
+    print(f"\n  Results: {passed} passed, {failed} failed, {skipped} skipped out of {total}")
     return 0 if failed == 0 else 1
 
 
