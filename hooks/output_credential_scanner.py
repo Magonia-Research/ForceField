@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""PostToolUse[Bash] output credential scanner.
+"""PostToolUse[Bash] and PostToolUse[Read] output credential scanner.
 
 Per OWASP LLM06 (Sensitive Information Disclosure):
-Scans Bash command output for leaked credentials.
+Scans Bash command output and Read file content for leaked credentials.
 High-confidence matches are redacted via updatedToolOutput.
 All matches emit a systemMessage warning.
 
@@ -182,12 +182,22 @@ def main() -> None:
         json.dump({}, sys.stdout)
         return
 
+    tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
-    command = tool_input.get("command", "")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
 
-    if is_safe_command(command):
-        json.dump({}, sys.stdout)
-        return
+    if tool_name == "Read":
+        # Read returns file content directly: there is no command to vet and no
+        # safe-command skip — a live credential in a file must be redacted before
+        # it enters the transcript. The file path is the scan's source label.
+        source = tool_input.get("file_path", "") or "Read"
+    else:
+        command = tool_input.get("command", "")
+        if is_safe_command(command):
+            json.dump({}, sys.stdout)
+            return
+        source = command
 
     response_text = data.get("tool_response", "")
     if not isinstance(response_text, str):
@@ -197,7 +207,7 @@ def main() -> None:
         json.dump({}, sys.stdout)
         return
 
-    result = scan_output(response_text, command)
+    result = scan_output(response_text, source)
     json.dump(result if result else {}, sys.stdout)
 
 

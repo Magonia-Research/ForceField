@@ -111,6 +111,11 @@
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/injection_defense.py",
             "timeout": 5000
+          },
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/output_credential_scanner.py",
+            "timeout": 5000
           }
         ]
       },
