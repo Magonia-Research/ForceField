@@ -220,6 +220,49 @@ def log_security_event(
         return {}
 
 
+def clamp_and_emit(
+    guard_name: str,
+    natural_decision: str,
+    reason: str,
+    *,
+    pattern_matched: str | None = None,
+    command: str | None = None,
+    file_path: str | None = None,
+) -> dict[str, Any] | None:
+    """Clamp a guard's natural decision by the tiered config, log it, and build
+    the PreToolUse hook response.
+
+    ``deny``/``ask`` -> a permissionDecision; ``warn`` -> context only
+    (systemMessage); ``allow``/``off`` -> None (a config downgrade waves the call
+    through). The clamp only ever loosens, so zero-false-positive-deny holds. The
+    caller writes the returned dict (or ``{}`` when None) to stdout. Shared by the
+    dispatcher and every standalone PreToolUse guard so the behavior is identical.
+    """
+    from config import effective_decision  # local import keeps config free of cycles
+
+    decision = effective_decision(guard_name, natural_decision)
+    extra = None if decision == natural_decision else {
+        "natural": natural_decision,
+        "config_downgraded": True,
+    }
+    log_security_event(
+        guard_name, decision,
+        pattern_matched=pattern_matched, command=command,
+        file_path=file_path, extra=extra,
+    )
+    if decision in ("deny", "ask"):
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": decision,
+                "permissionDecisionReason": reason,
+            },
+        }
+    if decision == "warn":
+        return {"systemMessage": reason}
+    return None
+
+
 if __name__ == "__main__":
     result = log_security_event(
         hook_name="hook-logging-selftest",

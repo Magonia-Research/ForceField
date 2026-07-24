@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from patterns import MAX_STDIN_BYTES  # noqa: E402
 from allowlist import is_suppressed  # noqa: E402
-from hook_logging import log_security_event  # noqa: E402
+from hook_logging import log_security_event, clamp_and_emit  # noqa: E402
 
 CREDENTIAL_PATTERNS = {
     "openai_key": re.compile(r"sk-[a-zA-Z0-9]{20,}"),
@@ -246,21 +246,12 @@ def main() -> None:
         json.dump({}, sys.stdout)
         return
 
-    log_security_event(
+    response = clamp_and_emit(
         "credential_guard", "ask",
+        format_alert(pattern_name, matched_text, file_path),
         pattern_matched=pattern_name, file_path=file_path,
     )
-
-    response = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "ask",
-            "permissionDecisionReason": format_alert(
-                pattern_name, matched_text, file_path
-            ),
-        },
-    }
-    json.dump(response, sys.stdout)
+    json.dump(response if response else {}, sys.stdout)
 
 
 if __name__ == "__main__":

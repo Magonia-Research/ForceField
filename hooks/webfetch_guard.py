@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 sys.path.insert(0, str(Path(__file__).parent))
 from patterns import MAX_STDIN_BYTES  # noqa: E402
 from allowlist import is_suppressed  # noqa: E402
-from hook_logging import log_security_event  # noqa: E402
+from hook_logging import log_security_event, clamp_and_emit  # noqa: E402
 from exfil_guard import EXFIL_PATTERNS as _EXFIL_PATTERNS  # noqa: E402
 
 # Single source of truth for known exfil / OOB-interaction / tunneling domains.
@@ -313,20 +313,12 @@ def main() -> None:
         json.dump({}, sys.stdout)
         return
 
-    decision = "deny" if pattern_name in HARD_DENY_PATTERNS else "ask"
-    log_security_event(
-        "webfetch_guard", decision,
+    natural = "deny" if pattern_name in HARD_DENY_PATTERNS else "ask"
+    response = clamp_and_emit(
+        "webfetch_guard", natural, format_alert(pattern_name, matched_text),
         pattern_matched=pattern_name, command=url,
     )
-
-    response = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
-            "permissionDecisionReason": format_alert(pattern_name, matched_text),
-        },
-    }
-    json.dump(response, sys.stdout)
+    json.dump(response if response else {}, sys.stdout)
 
 
 if __name__ == "__main__":

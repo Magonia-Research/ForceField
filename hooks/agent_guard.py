@@ -38,7 +38,7 @@ from credential_guard import (  # noqa: E402
     is_placeholder_credential,
 )
 from allowlist import is_suppressed  # noqa: E402
-from hook_logging import log_security_event  # noqa: E402
+from hook_logging import log_security_event, clamp_and_emit  # noqa: E402
 
 SECURITY_CONSTRAINTS = """\
 SECURITY CONSTRAINTS (enforced by automated hooks — violations will be blocked):
@@ -441,19 +441,10 @@ def run_all_checks(data: dict) -> dict | None:
         )
         return None
 
-    log_security_event(
-        "agent_guard", decision,
+    return clamp_and_emit(
+        "agent_guard", decision, alert_msg,
         pattern_matched=pattern_name,
-        extra={"subagent_type": subagent_type, "mode": mode},
     )
-
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
-            "permissionDecisionReason": alert_msg,
-        },
-    }
 
 
 def main() -> None:

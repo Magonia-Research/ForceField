@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from patterns import MAX_STDIN_BYTES  # noqa: E402
 from allowlist import is_suppressed  # noqa: E402
-from hook_logging import log_security_event  # noqa: E402
+from hook_logging import log_security_event, clamp_and_emit  # noqa: E402
 from credential_guard import CREDENTIAL_PATTERNS, FAKE_VALUE_PATTERNS  # noqa: E402
 from webfetch_guard import check_url as check_outbound_url  # noqa: E402
 
@@ -254,20 +254,11 @@ def _respond(
             extra={"tool": tool_name, "network_capable": net, "suppressed": True},
         )
         return None
-    log_security_event(
+    return clamp_and_emit(
         "mcp_guard", "ask",
+        format_alert(pattern_name, matched_text, tool_name, category),
         pattern_matched=pattern_name,
-        extra={"tool": tool_name, "network_capable": net},
     )
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "ask",
-            "permissionDecisionReason": format_alert(
-                pattern_name, matched_text, tool_name, category,
-            ),
-        },
-    }
 
 
 def evaluate_mcp_tool(tool_name: str, tool_input: dict) -> dict | None:

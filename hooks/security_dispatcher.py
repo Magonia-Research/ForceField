@@ -37,8 +37,7 @@ from credential_access_guard import check_command as cred_access_check  # noqa: 
 from credential_access_guard import format_alert as cred_access_format  # noqa: E402
 from credential_access_guard import HARD_DENY_PATTERNS as CRED_ACCESS_HARD_DENY  # noqa: E402
 from allowlist import is_suppressed  # noqa: E402
-from hook_logging import log_security_event  # noqa: E402
-from config import effective_decision  # noqa: E402
+from hook_logging import log_security_event, clamp_and_emit  # noqa: E402
 
 
 def _finish(
@@ -50,30 +49,13 @@ def _finish(
 ) -> dict[str, object] | None:
     """Clamp a guard's natural decision by config, log it, and build the response.
 
-    ``deny``/``ask`` emit a permissionDecision; ``warn`` emits context only
-    (systemMessage); ``allow``/``off`` return None (a config downgrade waves the
-    call through). The clamp only ever loosens, so zero-false-positive-deny holds.
+    Thin wrapper over ``hook_logging.clamp_and_emit`` so the dispatcher and the
+    standalone guards share one clamp / warn / wave-through implementation.
     """
-    decision = effective_decision(guard_name, natural_decision)
-    extra = None if decision == natural_decision else {
-        "natural": natural_decision,
-        "config_downgraded": True,
-    }
-    log_security_event(
-        guard_name, decision,
-        pattern_matched=pattern_name, command=command, extra=extra,
+    return clamp_and_emit(
+        guard_name, natural_decision, reason,
+        pattern_matched=pattern_name, command=command,
     )
-    if decision in ("deny", "ask"):
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": decision,
-                "permissionDecisionReason": reason,
-            },
-        }
-    if decision == "warn":
-        return {"systemMessage": reason}
-    return None
 
 
 def run_exfil_guard(command: str) -> dict[str, object] | None:
