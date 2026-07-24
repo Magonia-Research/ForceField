@@ -42,15 +42,83 @@ fi
 
 log_event() {
     local decision="$1" pattern="$2"
-    local ts
+    local ts cmd_json json
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    local json="{\"ts\":\"$ts\",\"hook\":\"container_first\",\"decision\":\"$decision\",\"pattern\":\"$pattern\",\"command\":$(printf '%s' "$CMD" | jq -Rs .)}"
+    cmd_json=$(printf '%s' "$CMD" | jq -Rs .)
+    json="{\"ts\":\"$ts\",\"hook\":\"container_first\",\"decision\":\"$decision\",\"pattern\":\"$pattern\",\"command\":$cmd_json}"
 
     if [[ "$(uname)" == "Darwin" ]]; then
         /usr/bin/log emit --subsystem com.anthropic.claude-code.hooks --category security --type default --public "$json" 2>/dev/null || true
     fi
     logger -t cc-security -p auth.warning "$json" 2>/dev/null || true
     echo "$json" >> ~/.claude/hooks/security.log 2>/dev/null || true
+}
+
+# -----------------------------------------------------------
+# Tiered-config ceiling for this guard. Full strength ("deny") by
+# default; ~/.claude/portcullis.json (trusted) or the project
+# .claude/portcullis.json (untrusted, floored at ask) can soften it.
+# Fast path: with no config file anywhere, stay at deny without paying a
+# python start-up. Any resolution error falls back to deny (full
+# strength), never to allow. resolve_ceiling in config.py owns the trust
+# model, so this bash guard honors exactly the same rules as the python
+# guards without reimplementing them.
+# -----------------------------------------------------------
+CEILING="deny"
+if [[ -f "$HOME/.claude/portcullis.json" || -f "$PWD/.claude/portcullis.json" ]]; then
+  _SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
+  CEILING=$(python3 -c "import sys; sys.path.insert(0, '$_SCRIPT_DIR'); import config; print(config.resolve_ceiling('container_first'))" 2>/dev/null || echo deny)
+  case "$CEILING" in deny | ask | warn | allow | off) ;; *) CEILING="deny" ;; esac
+fi
+
+# Emit a would-be DENY through the config ceiling: block (deny), prompt
+# (ask), warn (systemMessage), or silently allow. The default ceiling
+# reproduces the block exactly.
+emit_deny() {
+  local pattern="$1" stderr_msg="$2"
+  case "$CEILING" in
+    deny)
+      log_event "deny" "$pattern"
+      printf '%s\n' "$stderr_msg" >&2
+      exit 2
+      ;;
+    ask)
+      log_event "ask" "$pattern"
+      printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Portcullis container-first guard flagged this command (%s). Config softened the block to a prompt; approve only if you trust it."}}' "$pattern"
+      exit 0
+      ;;
+    warn)
+      log_event "warn" "$pattern"
+      printf '{"systemMessage":"Portcullis container-first guard flagged this command (%s). Config downgraded the block to a warning."}' "$pattern"
+      exit 0
+      ;;
+    *)
+      log_event "allow" "$pattern"
+      exit 0
+      ;;
+  esac
+}
+
+# Emit a would-be ASK through the config ceiling (ask stays ask unless a
+# trusted config lowers it to warn or off).
+emit_ask2() {
+  local pattern="$1" reason="$2"
+  case "$CEILING" in
+    deny | ask)
+      log_event "ask" "$pattern"
+      printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"%s"}}' "$reason"
+      exit 0
+      ;;
+    warn)
+      log_event "warn" "$pattern"
+      printf '{"systemMessage":"%s"}' "$reason"
+      exit 0
+      ;;
+    *)
+      log_event "allow" "$pattern"
+      exit 0
+      ;;
+  esac
 }
 
 # -----------------------------------------------------------
@@ -71,6 +139,8 @@ log_event() {
 # once the quotes themselves are removed below.
 _dq='"'
 _sq="'"
+# shellcheck disable=SC2016,SC1003  # the sed/tr operands are a literal ${IFS} regex
+# and a literal backslash for detection-only NORM matching, not shell expansions.
 NORM=$(printf '%s' "$CMD" | sed -E 's/\$\{IFS\}/ /g; s/\$IFS/ /g' \
   | sed -E "s/\\\$[$_dq$_sq]//g" \
   | tr -d '\\' | tr -d '"' | tr -d "'")
@@ -113,9 +183,7 @@ fi
 if echo "$NORM" | grep -qiE '(^|;[[:space:]]*|&&[[:space:]]*|[|][|][[:space:]]*|[|][[:space:]]*)rm[[:space:]]' \
   && echo "$NORM" | grep -qiE '(^|[[:space:]])-[a-zA-Z]*[rR]|--recursive' \
   && echo "$NORM" | grep -qiE '(^|[[:space:]])-[a-zA-Z]*[fF]|--force'; then
-  log_event "deny" "rm_rf"
-  echo 'BLOCKED: Use trash instead of rm -rf' >&2
-  exit 2
+  emit_deny "rm_rf" 'BLOCKED: Use trash instead of rm -rf'
 fi
 
 # -----------------------------------------------------------
@@ -132,9 +200,7 @@ RM_RF_FLAGS='(-[a-z]*r[a-z]*f[a-z]*|-[a-z]*f[a-z]*r[a-z]*|-r[[:space:]]+-f|-f[[:
 INDIRECT_RM='(-exec(dir)?[[:space:]]+|xargs([[:space:]]+-[^[:space:]]+)*[[:space:]]+)rm[[:space:]]+'
 
 if echo "$NORM" | grep -qiE "${INDIRECT_RM}${RM_RF_FLAGS}"; then
-  log_event "deny" "rm_rf_indirect"
-  echo 'BLOCKED: Use trash instead of recursive force-delete (find -exec rm -rf / xargs rm -rf).' >&2
-  exit 2
+  emit_deny "rm_rf_indirect" 'BLOCKED: Use trash instead of recursive force-delete (find -exec rm -rf / xargs rm -rf).'
 fi
 
 # Block: bare `find <path> -delete` wipes the entire tree (rm -rf
@@ -142,9 +208,7 @@ fi
 # -type, ...) between the path and -delete breaks this match, so
 # filtered cleanup like `find . -name '*.pyc' -delete` stays allowed.
 if echo "$NORM" | grep -qiE '(^|;[[:space:]]*|&&[[:space:]]*|[|][|]?[[:space:]]*)[[:space:]]*find([[:space:]]+[^[:space:]-][^[:space:]]*)?[[:space:]]+-delete([[:space:]]|$)'; then
-  log_event "deny" "find_delete"
-  echo 'BLOCKED: bare "find <path> -delete" wipes the whole tree. Use trash, or add a filter (-name/-type/...).' >&2
-  exit 2
+  emit_deny "find_delete" 'BLOCKED: bare "find <path> -delete" wipes the whole tree. Use trash, or add a filter (-name/-type/...).'
 fi
 
 # -----------------------------------------------------------
@@ -159,10 +223,7 @@ fi
 # -----------------------------------------------------------
 
 if echo "$CMD" | grep -qE '(\\x[0-9a-fA-F]{2}|\\[0-7]{3}|\\u00[0-7][0-9a-fA-F]|\\U000000[0-7][0-9a-fA-F])'; then
-  log_event "deny" "obfuscation"
-  echo 'BLOCKED: Obfuscated command detected (hex/octal escape sequences).' >&2
-  echo 'If this is legitimate, write it in plain text.' >&2
-  exit 2
+  emit_deny "obfuscation" $'BLOCKED: Obfuscated command detected (hex/octal escape sequences).\nIf this is legitimate, write it in plain text.'
 fi
 
 # -----------------------------------------------------------
@@ -171,10 +232,7 @@ fi
 
 if echo "$NORM" | grep -qE '(nsenter\s+|unshare\s+.*--mount|unshare\s+([^;&|]*[[:space:]])?-[a-zA-Z]*m|ptrace)' \
   || echo "$CMD" | grep -qE '(^|[[:space:];&|(=])[A-Za-z_][A-Za-z0-9_]*=(unshare|nsenter)([[:space:];&|/]|$)'; then
-  log_event "deny" "container_escape"
-  echo 'BLOCKED: Container escape technique detected (nsenter/unshare/ptrace).' >&2
-  echo 'These tools break container isolation and have no legitimate dev use.' >&2
-  exit 2
+  emit_deny "container_escape" $'BLOCKED: Container escape technique detected (nsenter/unshare/ptrace).\nThese tools break container isolation and have no legitimate dev use.'
 fi
 
 # -----------------------------------------------------------
@@ -192,10 +250,8 @@ fi
 OVERPRIV_PATTERN='(--privileged|--cap-add[= ](CAP_)?(ALL|SYS_ADMIN|SYS_PTRACE|SYS_MODULE|SYS_RAWIO|SYS_BOOT|DAC_READ_SEARCH|DAC_OVERRIDE|BPF)|(seccomp|apparmor)[=:]unconfined|--pid[= ]host|--net(work)?[= ]host|--ipc[= ]host|--uts[= ]host|--userns[= ]host|-v[= ]/:|--volume[= ]/:|--device[= ]|mount[[:space:]].*-o[[:space:]].*bind|--mount[[:space:]=][^;&|]*(src|source)=/([,[:space:]]|$))'
 
 if echo "$NORM" | grep -qiE "$OVERPRIV_PATTERN" || echo "$CMD" | grep -qiE "$OVERPRIV_PATTERN"; then
-  log_event "ask" "container_overprivileged"
   REASON='CONTAINER-FIRST: Over-privileged container detected.\n\nBest practices:\n- Use --cap-add=<SPECIFIC_CAP> instead of --privileged\n- Use --network=<name> instead of --net=host\n- Mount specific paths read-only (-v /path:/path:ro) instead of mounting /\n- For nested containers, use --device /dev/fuse instead of --privileged\n\nIf this is genuinely required (e.g., CI runner, GPU access), approve to proceed.'
-  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"%s"}}' "$REASON"
-  exit 0
+  emit_ask2 "container_overprivileged" "$REASON"
 fi
 
 # -----------------------------------------------------------
@@ -203,10 +259,7 @@ fi
 # -----------------------------------------------------------
 
 if echo "$NORM" | grep -qE '(insmod|modprobe|(^|[[:space:];&|(])sysctl[[:space:]]+[^;|&]*=|>>?[[:space:]]*/(proc/sys|sys/)|(^|[[:space:]|])tee[[:space:]]+(-[A-Za-z]+[[:space:]]+)*/(proc/sys|sys/)|of=/(proc/sys|sys/))'; then
-  log_event "deny" "kernel_manipulation"
-  echo 'BLOCKED: Kernel/system manipulation detected.' >&2
-  echo 'Loading modules or writing to /proc and /sys is not permitted.' >&2
-  exit 2
+  emit_deny "kernel_manipulation" $'BLOCKED: Kernel/system manipulation detected.\nLoading modules or writing to /proc and /sys is not permitted.'
 fi
 
 # -----------------------------------------------------------
@@ -275,10 +328,8 @@ INSTALL_PATTERN='(pip3?\s+install|python3?\s+-m\s+pip\s+install|npm\s+install|pn
 # Match the normalized command too, so a quote or ${IFS} split of the installer
 # token (pip 'install' x, pip${IFS}install x) cannot dodge the host-install ask.
 if echo "$CMD" | grep -qiE "$INSTALL_PATTERN" || echo "$NORM" | grep -qiE "$INSTALL_PATTERN"; then
-  log_event "ask" "host_pkg_install"
   REASON='CONTAINER-FIRST: Package install detected on host OS.\n\n- Python: podman run --rm -v ./data:/data:ro python:3.13-slim sh -c \"pip install PKG && python /data/script.py\"\n- Node: podman run --rm -v ./src:/src:ro node:22-slim npx <tool>\n- System: podman run --rm <image> instead of brew/apt-get\n- Rust: cargo install goes to ~/.cargo/bin, clean up after\n\nIf this install is necessary on the host, approve to proceed.'
-  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"%s"}}' "$REASON"
-  exit 0
+  emit_ask2 "host_pkg_install" "$REASON"
 fi
 
 # -----------------------------------------------------------
