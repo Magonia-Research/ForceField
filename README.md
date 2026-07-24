@@ -241,6 +241,34 @@ Create `.claude/hook-allowlist.json` in your project to suppress specific patter
 }
 ```
 
+## Known friction and how to loosen it
+
+Portcullis ships strict, so a few legitimate workflows draw an `ask` — and a handful of zero-false-positive patterns a `deny`. Reach for the narrowest relief that clears the specific trigger:
+
+1. **Allowlist one pattern or path** (`.claude/hook-allowlist.json`) — best when a single command or file trips an `ask`.
+2. **Soften one guard** (`portcullis.json` → `guards.<name>.mode`) — when a whole guard is too strict for this machine or project.
+3. **Pick a preset** (`strict` / `balanced` / `permissive`) — to trade strictness broadly.
+4. **Disable a guard for a project** (home config `projects` map, `mode: off`) — last resort, and only from your trusted home file.
+
+One rule shapes all of this: **an allowlist cannot suppress a hard-`deny`.** Hard denies (reverse shell, `nc`, exfil/relay domains, `/dev/tcp`, fetch-piped-to-shell, `rm -rf`, obfuscation) are deliberately non-suppressible, so the only way to loosen one is a preset or per-guard `mode` in your **trusted** `~/.claude/portcullis.json` — never a repo file. That is what stops a cloned repo from allowlisting away the guard standing between it and your credentials.
+
+| Legitimate workflow that trips a guard | Guard | Level | Relief |
+|------|------|------|------|
+| Host package install (`pip`/`npm i`/`apt`) instead of a container | container-first | ask | Run it in a container; or loosen `container_first` in home config |
+| Local dev server, `base64`, interpreter one-liner caught by a broad rule | sigma_engine | ask | `severity_floor: high`, or `sigma_engine: warn`; `balanced`/`permissive` already warn |
+| `curl … \| sh` installer (rustup, nvm) | supply_chain_guard | **deny** | `balanced` preset (supply → ask) — hard-deny, so not allowlistable |
+| Global install (`npm i -g`, `pipx`) | supply_chain_guard | ask | Allowlist `global_install`, or run in a container |
+| `scp` / `rsync` / `curl -d` to your own host | exfil_guard | ask | Allowlist `remote_copy` / `curl_post_data` (+ the path); relay domains stay denied |
+| Reading a project `.env` in dev | credential_access_guard | ask | Allowlist that path under `suppress_paths` |
+| Fake keys in fixtures / `.env.example` | credential_guard | ask | Placeholders are already skipped; else `suppress_paths: ["tests/fixtures/**", "**/*.example"]` |
+| Editing `~/.zshrc` / `~/.gitconfig` / init files | filesystem_guard | ask | Allowlist the path, or disable `filesystem_guard` for that project in home config |
+| Recursive submodule clone / `git config` in a trusted repo | git_guard | ask | Allowlist `recursive_submodule_clone` / `git_config_rce_primitive` for that repo |
+| Many subagent spawns hitting the rate limit | agent_guard | **deny** | `permissive` (agent → ask) — the limit (10 ask / 20 deny) is not otherwise tunable |
+| MCP call legitimately carrying base64 / a long token | mcp_guard | ask | Allowlist the `suppress_patterns` for that server |
+| WebFetch of a URL with an encoded query blob | webfetch_guard | ask | Allowlist it, or `balanced` (webfetch → ask); exfil domains stay denied |
+
+If Portcullis is broadly too loud on a machine, set a `preset` once (see [Tiered strictness configuration](#tiered-strictness-configuration)) instead of disabling guards one at a time: `balanced` clears the most common blocking-guard friction while keeping every hard-deny, and `permissive` prompts for everything and blocks nothing.
+
 ## Querying security logs
 
 Every decision is written as one OpenTelemetry log record carrying an OCSF Detection Finding projection in its `Attributes` (`ocsf.class_uid` 2004). Severity is normalized once, so a filter never has to text-match a decision: `deny`/`block` → `SeverityText` `ERROR` / `ocsf.severity_id` 4, `redact` → `WARN`/3, `ask` → `WARN`/3, `warn` → `WARN`/2, `allow` → `INFO`/1. An unknown decision reports at `WARN`, never a silent `INFO`.
