@@ -47,7 +47,8 @@ def run_exfil_guard(command: str) -> dict[str, object] | None:
         return None
 
     pattern_name, matched_text = result
-    if is_suppressed("exfil_guard", pattern_name=pattern_name):
+    is_hard_deny = pattern_name in EXFIL_HARD_DENY
+    if not is_hard_deny and is_suppressed("exfil_guard", pattern_name=pattern_name):
         log_security_event(
             "exfil_guard", "allow",
             pattern_matched=pattern_name, command=command,
@@ -55,7 +56,7 @@ def run_exfil_guard(command: str) -> dict[str, object] | None:
         )
         return None
 
-    decision = "deny" if pattern_name in EXFIL_HARD_DENY else "ask"
+    decision = "deny" if is_hard_deny else "ask"
     log_security_event(
         "exfil_guard", decision,
         pattern_matched=pattern_name, command=command,
@@ -98,20 +99,24 @@ def run_supply_chain_guard(command: str) -> dict[str, object] | None:
             },
         }
 
-    if supply_allowlisted(command):
-        return None
-
     danger_result = check_dangerous(command)
     if danger_result:
         pattern_name, matched_text = danger_result
-        if is_suppressed("supply_chain_guard", pattern_name=pattern_name):
+        is_hard_deny = pattern_name in SUPPLY_HARD_DENY
+        # A hard-deny (pipe-to-shell, fetch-exec) is never waved through by the
+        # command allowlist or a per-project suppression; only ask-severity
+        # patterns honor those layers.
+        if not is_hard_deny and (
+            is_suppressed("supply_chain_guard", pattern_name=pattern_name)
+            or supply_allowlisted(command)
+        ):
             log_security_event(
                 "supply_chain_guard", "allow",
                 pattern_matched=pattern_name, command=command,
                 extra={"suppressed": True},
             )
             return None
-        decision = "deny" if pattern_name in SUPPLY_HARD_DENY else "ask"
+        decision = "deny" if is_hard_deny else "ask"
         log_security_event(
             "supply_chain_guard", decision,
             pattern_matched=pattern_name, command=command,
@@ -136,7 +141,8 @@ def run_git_guard(command: str) -> dict[str, object] | None:
         return None
 
     pattern_name, matched_text = result
-    if is_suppressed("git_guard", pattern_name=pattern_name):
+    is_hard_deny = pattern_name in GIT_HARD_DENY
+    if not is_hard_deny and is_suppressed("git_guard", pattern_name=pattern_name):
         log_security_event(
             "git_guard", "allow",
             pattern_matched=pattern_name, command=command,
@@ -144,7 +150,7 @@ def run_git_guard(command: str) -> dict[str, object] | None:
         )
         return None
 
-    decision = "deny" if pattern_name in GIT_HARD_DENY else "ask"
+    decision = "deny" if is_hard_deny else "ask"
     log_security_event(
         "git_guard", decision,
         pattern_matched=pattern_name, command=command,
@@ -165,7 +171,8 @@ def run_credential_access_guard(command: str) -> dict[str, object] | None:
         return None
 
     pattern_name, matched_text = result
-    if is_suppressed("credential_access_guard", pattern_name=pattern_name):
+    is_hard_deny = pattern_name in CRED_ACCESS_HARD_DENY
+    if not is_hard_deny and is_suppressed("credential_access_guard", pattern_name=pattern_name):
         log_security_event(
             "credential_access_guard", "allow",
             pattern_matched=pattern_name, command=command,
@@ -173,7 +180,7 @@ def run_credential_access_guard(command: str) -> dict[str, object] | None:
         )
         return None
 
-    decision = "deny" if pattern_name in CRED_ACCESS_HARD_DENY else "ask"
+    decision = "deny" if is_hard_deny else "ask"
     log_security_event(
         "credential_access_guard", decision,
         pattern_matched=pattern_name, command=command,
@@ -207,17 +214,48 @@ def _pick_highest(
     return a
 
 
+def _emit_ask_uninspectable() -> None:
+    """Emit an 'ask' when stdin is too large or malformed to inspect.
+
+    Closes the fail-open hole where a payload larger than MAX_STDIN_BYTES truncates
+    and the JSON parse fails: rather than a silent allow, prompt the user. Never a
+    hard block (zero-false-positive-deny), never a silent pass.
+    """
+    log_security_event(
+        "security_dispatcher", "ask", command="<uninspectable>",
+        extra={"reason": "oversized_or_unparseable_input"},
+    )
+    json.dump({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "ask",
+            "permissionDecisionReason": (
+                "Portcullis could not inspect this Bash command: the hook input "
+                f"exceeds {MAX_STDIN_BYTES} bytes or is malformed. Approve only if "
+                "you trust this command."
+            ),
+        },
+    }, sys.stdout)
+
+
 def main() -> None:
     """Dispatch stdin through exfil and supply-chain guards."""
+    raw = sys.stdin.read(MAX_STDIN_BYTES + 1)
+    oversized = len(raw) > MAX_STDIN_BYTES
     try:
-        raw = sys.stdin.read(MAX_STDIN_BYTES)
         input_data = json.loads(raw)
-    except (json.JSONDecodeError, OSError, ValueError):
+    except (json.JSONDecodeError, ValueError):
+        input_data = None
+
+    if oversized or (raw.strip() and input_data is None):
+        _emit_ask_uninspectable()
+        return
+    if not isinstance(input_data, dict):
         json.dump({}, sys.stdout)
         return
 
     tool_input = input_data.get("tool_input", {})
-    command = tool_input.get("command", "")
+    command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
 
     if not command:
         json.dump({}, sys.stdout)

@@ -228,3 +228,6 @@ hooks/security.log
 /CLAUDE.md
 intel/
 *.fts-bak
+
+# Scratch / intermediate work — never ship
+.claude-tmp/

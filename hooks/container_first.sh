@@ -8,7 +8,33 @@ set -euo pipefail
 # Fail-open: any unexpected error exits 0 (allow) rather than blocking
 trap 'exit 0' ERR
 
-CMD=$(head -c 1048576 | jq -r '.tool_input.command')
+# Emit an ask when the command cannot be inspected. Failing to a prompt (never a
+# silent allow) closes the fail-open holes where jq is missing or the payload is
+# too large / malformed to parse.
+emit_ask() {
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"%s"}}' "$1"
+    exit 0
+}
+
+# jq is required to parse the hook payload; without it, prompt rather than
+# waving the command through.
+if ! command -v jq >/dev/null 2>&1; then
+  emit_ask "Portcullis container-first guard cannot inspect this command: jq is not installed. Approve only if you trust it."
+fi
+
+# Read 1 MiB + 1 byte so an oversized payload (which would truncate and break
+# JSON parsing, failing open) is detected rather than silently allowed.
+INPUT=$(head -c 1048577)
+if [[ ${#INPUT} -gt 1048576 ]]; then
+  emit_ask "Portcullis could not inspect this Bash command: it exceeds 1 MiB. Approve only if you trust it."
+fi
+
+if ! CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command' 2>/dev/null); then
+  if [[ -n "$INPUT" ]]; then
+    emit_ask "Portcullis could not inspect this Bash command: malformed hook input. Approve only if you trust it."
+  fi
+  exit 0
+fi
 
 # -----------------------------------------------------------
 # Logging helper (fire-and-forget)

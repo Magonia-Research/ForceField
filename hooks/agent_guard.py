@@ -37,8 +37,6 @@ from credential_guard import CREDENTIAL_PATTERNS, is_fake_value  # noqa: E402
 from allowlist import is_suppressed  # noqa: E402
 from hook_logging import log_security_event  # noqa: E402
 
-CONSTRAINTS_HEADER = "SECURITY CONSTRAINTS (enforced by automated hooks"
-
 SECURITY_CONSTRAINTS = """\
 SECURITY CONSTRAINTS (enforced by automated hooks — violations will be blocked):
 1. Do NOT read or write files in ~/.ssh, ~/.aws, ~/.gnupg, or ~/.config/gcloud.
@@ -170,7 +168,11 @@ def _write_state(path: Path, data: dict) -> None:
 
 
 def build_constraint_response(prompt: str) -> dict:
-    if prompt.startswith(CONSTRAINTS_HEADER):
+    # Idempotency: skip re-injection only when our EXACT constraints block is
+    # already prepended (a genuine prior injection). Matching on the header prefix
+    # alone let an attacker suppress injection by opening their prompt with the
+    # literal header text, so require the full block.
+    if prompt.startswith(SECURITY_CONSTRAINTS):
         return {}
     modified_prompt = SECURITY_CONSTRAINTS + prompt
     return {
