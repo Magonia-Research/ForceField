@@ -27,7 +27,7 @@ from supply_chain_guard import (  # noqa: E402
     check_typosquat,
     format_danger_alert,
     format_typosquat_alert,
-    is_allowlisted as supply_allowlisted,
+    allowlist_clears_danger,
     HARD_DENY_PATTERNS as SUPPLY_HARD_DENY,
 )
 from git_guard import check_git  # noqa: E402
@@ -105,10 +105,12 @@ def run_supply_chain_guard(command: str) -> dict[str, object] | None:
         is_hard_deny = pattern_name in SUPPLY_HARD_DENY
         # A hard-deny (pipe-to-shell, fetch-exec) is never waved through by the
         # command allowlist or a per-project suppression; only ask-severity
-        # patterns honor those layers.
+        # patterns honor those layers. The allowlist is scoped to the segment
+        # that carries the danger, so a benign install prefix cannot launder a
+        # dangerous segment elsewhere in a compound command.
         if not is_hard_deny and (
             is_suppressed("supply_chain_guard", pattern_name=pattern_name)
-            or supply_allowlisted(command)
+            or allowlist_clears_danger(command, pattern_name)
         ):
             log_security_event(
                 "supply_chain_guard", "allow",

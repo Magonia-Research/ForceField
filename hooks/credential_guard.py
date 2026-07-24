@@ -33,10 +33,11 @@ CREDENTIAL_PATTERNS = {
     "aws_access_key": re.compile(r"AKIA[0-9A-Z]{16}"),
     "aws_sts_key": re.compile(r"ASIA[0-9A-Z]{16}"),
     "aws_secret_key": re.compile(
-        r"(?i)aws_secret_access_key\s*[=:]\s*[a-zA-Z0-9/+=]{40}"
+        r"(?i)aws_secret_access_key\s*[=:]\s*['\"]?[a-zA-Z0-9/+=]{40}"
     ),
     "private_key_header": re.compile(
-        r"-----BEGIN\s+(RSA|DSA|EC|OPENSSH|PGP)\s+PRIVATE\s+KEY-----"
+        r"-----BEGIN\s+(?:(?:RSA|DSA|EC|OPENSSH|PGP|ENCRYPTED)\s+)?"
+        r"PRIVATE\s+KEY-----"
     ),
     "jwt_token": re.compile(
         r"eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\."
@@ -52,11 +53,20 @@ CREDENTIAL_PATTERNS = {
     "stripe_key": re.compile(r"(sk|pk)_(test|live)_[a-zA-Z0-9]{24,}"),
 }
 
-EXCLUDED_FILE_GLOBS = [
-    "*.env", "*.env.*",
-    "**/test*/**", "**/fixture*/**", "**/*.example",
-    "**/tests/**", "**/testdata/**",
-]
+# Conventional test/fixture DIRECTORY names, matched exactly per path segment.
+# A prefix glob (``test*``) plus ``fnmatch`` on the full path was unsafe: its
+# ``*`` spans ``/``, so any component beginning with ``test`` (``testbed``,
+# ``testing``) skipped the credential scan entirely. Exact-segment matching keeps
+# genuine fixture trees excluded while still inspecting a real secret written to
+# an incidental ``test*``-named directory.
+EXCLUDED_DIR_SEGMENTS = frozenset([
+    "test", "tests", "__tests__", "testdata", "test-data", "test_data",
+    "fixture", "fixtures", "__fixtures__",
+])
+
+# Non-secret example/env FILENAMES, matched against the basename only so the
+# wildcard cannot cross a directory separator.
+EXCLUDED_FILENAME_GLOBS = ("*.env", "*.env.*", "*.example")
 
 FAKE_VALUE_PATTERNS = re.compile(
     r"(?i)(example|placeholder|dummy|fake|test|xxx|your[_-])"
@@ -68,8 +78,21 @@ COMMENT_CONTEXT = re.compile(
 
 
 def is_excluded_path(file_path: str) -> bool:
-    for glob_pattern in EXCLUDED_FILE_GLOBS:
-        if fnmatch(file_path, glob_pattern):
+    """True for a conventional test/fixture path or an env/example file.
+
+    Segment-aware: a wildcard never crosses ``/``, and directory names must match
+    ``EXCLUDED_DIR_SEGMENTS`` exactly, so a real credential written under an
+    incidental ``test*``-named directory is still scanned.
+    """
+    segments = [seg for seg in file_path.replace("\\", "/").split("/") if seg]
+    if not segments:
+        return False
+    for segment in segments[:-1]:
+        if segment.lower() in EXCLUDED_DIR_SEGMENTS:
+            return True
+    basename = segments[-1]
+    for glob_pattern in EXCLUDED_FILENAME_GLOBS:
+        if fnmatch(basename, glob_pattern):
             return True
     return False
 
@@ -80,6 +103,35 @@ def is_fake_value(matched_text: str, line: str) -> bool:
     if COMMENT_CONTEXT.search(line):
         return True
     return False
+
+
+# Structural credential tokens whose SHAPE is self-authenticating (an AKIA id,
+# a ghp_/sk- token, a PEM private-key header, an aws_secret_access_key=<40>
+# assignment). An attacker-appended line comment ("# sample", "# demo") must not
+# neutralize these — only a fake marker inside the matched VALUE itself (AWS's
+# own AKIAIOSFODNN7EXAMPLE) does. Low-confidence heuristic assignments still
+# honor the line-level comment context.
+HIGH_CONFIDENCE_NAMES = frozenset([
+    "openai_key", "anthropic_key", "github_token", "github_oauth_token",
+    "github_server_token", "github_fine_grained", "gitlab_token", "npm_token",
+    "aws_access_key", "aws_sts_key", "aws_secret_key", "private_key_header",
+    "jwt_token", "slack_token", "stripe_key",
+])
+
+
+def is_placeholder_credential(
+    matched_text: str, line: str, high_confidence: bool,
+) -> bool:
+    """Whether a credential match is a placeholder/example, not a live secret.
+
+    High-confidence structural tokens are suppressed only by a fake marker
+    inside the matched value; a line-level comment an attacker can append does
+    NOT neutralize them. Low-confidence heuristic matches still honor the
+    comment context via ``is_fake_value``.
+    """
+    if high_confidence:
+        return bool(FAKE_VALUE_PATTERNS.search(matched_text))
+    return is_fake_value(matched_text, line)
 
 
 def extract_content(tool_name: str, tool_input: dict) -> tuple[str, str]:

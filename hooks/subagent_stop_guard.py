@@ -23,30 +23,45 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from patterns import MAX_STDIN_BYTES  # noqa: E402
-from credential_guard import CREDENTIAL_PATTERNS, is_fake_value  # noqa: E402
+from credential_guard import (  # noqa: E402
+    CREDENTIAL_PATTERNS,
+    HIGH_CONFIDENCE_NAMES,
+    is_placeholder_credential,
+)
 from hook_logging import log_security_event  # noqa: E402
 
 INJECTION_TARGETING_PARENT = re.compile(
-    r"(?i)(ignore\s+(previous|prior|all|your)\s+(instructions?|rules?|constraints?)"
-    r"|disregard\s+(safety|security|rules?|instructions?)"
-    r"|override\s+(all|previous|prior)\s+(rules?|instructions?)"
+    r"(?i)("
+    r"(?:ignore|disregard|override)\s+"
+    r"(?:(?:previous|prior|all|your|earlier|above|preceding|existing"
+    r"|original|initial|system|current)\s+)+"
+    r"(?:instructions?|rules?|constraints?)"
+    r"|disregard\s+(safety|security|rules?|instructions?|constraints?)"
     r"|new\s+instructions?\s*:"
     r"|<\s*/?\s*(system|system-reminder|tool_result|function_results)\s*>)"
 )
 
+# Command substitution recognized in BOTH $(...) and backtick `...` forms. The
+# backtick branch is single-line (`[^`\n]`) and restricted to destructive forms
+# (rm -rf / chmod 777 / nc ... -e) so ordinary inline code like `git status` or
+# `curl https://api...` is never blocked; curl|sh piping is already caught below.
 EMBEDDED_COMMANDS = re.compile(
     r"(?m)(^```(?:bash|sh|shell|zsh)\s*\n.*?(rm\s+-rf|curl\s+.*\|\s*bash"
     r"|sudo\s+|chmod\s+777|nc\s+.*-e).*?\n```"
-    r"|\$\(.*?(rm|curl|wget|nc|ncat).*?\))",
+    r"|\$\(.*?(rm|curl|wget|nc|ncat).*?\)"
+    r"|`[^`\n]*(rm\s+-rf|rm\s+-fr|chmod\s+777|nc\s+[^`\n]*-e)[^`\n]*`"
+    r"|(?:curl|wget)\b[^\n]*\|\s*(?:sudo\s+)?(?:bash|sh|zsh|ksh|fish|dash)\b)",
     re.DOTALL,
 )
 
 EXFIL_IN_OUTPUT = {
     "base64_blob": re.compile(r"[A-Za-z0-9+/]{200,}={0,2}"),
     "exfil_url": re.compile(
-        r"https?://(ngrok\.io|requestbin\.com|hookbin\.com"
+        r"https?://[^\s/]*?"
+        r"(ngrok\.io|ngrok-free\.app|ngrok\.app|requestbin\.com|hookbin\.com"
         r"|pipedream\.net|burpcollaborator\.net|interact\.sh"
-        r"|canarytokens\.com|webhook\.site)"
+        r"|canarytokens\.com|webhook\.site|trycloudflare\.com"
+        r"|oastify\.com|serveo\.net|localtunnel\.me)"
     ),
     "data_uri": re.compile(r"data:[^;]{1,50};base64,[A-Za-z0-9+/]{100,}"),
 }
@@ -61,7 +76,9 @@ def check_output_credentials(text: str) -> dict | None:
     for line in text.splitlines():
         for name, pattern in CREDENTIAL_PATTERNS.items():
             match = pattern.search(line)
-            if match and not is_fake_value(match.group(0), line):
+            if match and not is_placeholder_credential(
+                match.group(0), line, name in HIGH_CONFIDENCE_NAMES
+            ):
                 redacted = match.group(0)[:8] + "..." + match.group(0)[-4:]
                 log_security_event(
                     "subagent_stop_guard", "deny",

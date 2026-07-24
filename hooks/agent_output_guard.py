@@ -24,7 +24,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 from patterns import MAX_STDIN_BYTES  # noqa: E402
 from allowlist import is_suppressed  # noqa: E402
 from hook_logging import log_security_event  # noqa: E402
-from credential_guard import CREDENTIAL_PATTERNS, is_fake_value  # noqa: E402
+from credential_guard import (  # noqa: E402
+    CREDENTIAL_PATTERNS,
+    HIGH_CONFIDENCE_NAMES,
+    is_placeholder_credential,
+)
 from subagent_stop_guard import (  # noqa: E402
     INJECTION_TARGETING_PARENT,
     EMBEDDED_COMMANDS,
@@ -54,7 +58,9 @@ def _first_credential(text: str) -> str | None:
     for line in text.splitlines():
         for name, pattern in CREDENTIAL_PATTERNS.items():
             match = pattern.search(line)
-            if match and not is_fake_value(match.group(0), line):
+            if match and not is_placeholder_credential(
+                match.group(0), line, name in HIGH_CONFIDENCE_NAMES
+            ):
                 return name
     return None
 

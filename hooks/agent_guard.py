@@ -33,7 +33,10 @@ MAX_SPAWNS_DENY = 20
 
 sys.path.insert(0, str(Path(__file__).parent))
 from patterns import MAX_STDIN_BYTES, DECISION_PRECEDENCE as _DECISION_PRECEDENCE  # noqa: E402
-from credential_guard import CREDENTIAL_PATTERNS, is_fake_value  # noqa: E402
+from credential_guard import (  # noqa: E402
+    CREDENTIAL_PATTERNS,
+    is_placeholder_credential,
+)
 from allowlist import is_suppressed  # noqa: E402
 from hook_logging import log_security_event  # noqa: E402
 
@@ -67,25 +70,33 @@ INJECTION_PATTERNS = {
         r"|disable\s+(security|guards?|checks?))"
     ),
     "unrestricted_access": re.compile(
-        r"(?i)(you\s+have\s+(full|unrestricted|unlimited)\s+access"
-        r"|unrestricted\s+(access|mode|permissions?)"
+        r"(?i)(you\s+(?:now\s+|already\s+)?have\s+(full|unrestricted|unlimited)\s+(?:\w+\s+)?access"
+        r"|(unrestricted|unlimited|unfettered)\s+(?:\w+\s+)?(access|mode|permissions?)"
         r"|no\s+(limits?|restrictions?|constraints?|boundaries)"
         r"|all\s+permissions?\s+(granted|enabled|available))"
     ),
     "override_manipulation": re.compile(
-        r"(?i)(ignore\s+(previous|prior|all|your)\s+(instructions?|rules?|constraints?)"
-        r"|disregard\s+(safety|security|rules?|instructions?|constraints?)"
-        r"|override\s+(all|previous|prior)\s+(rules?|instructions?))"
+        r"(?i)("
+        r"(ignore|disregard|override)\s+"
+        r"(?:(?:the|all|any|these|those|your|my|our|previous|prior|earlier|above"
+        r"|preceding|foregoing|existing|original|initial|system|current|real|actual)\s+)*"
+        r"(instructions?|rules?|constraints?|directives?|guidelines?|prompts?)"
+        r"|disregard\s+(safety|security)"
+        r")"
     ),
     "xml_tag_injection": re.compile(
-        r"<\s*/?\s*(system|system-reminder|tool_result|function_results"
-        r"|assistant|human|user)\s*>"
+        r"(?i)<\s*/?\s*"
+        r"(?:system|system-reminder|tool_result|function_results|assistant|human|user"
+        r"|[\w-]*(?:policy|instruction|directive|context|boundary|guardrail"
+        r"|constraint|safety|sandbox|session|reminder|prompt)[\w-]*)"
+        r"\s*>"
     ),
     "unicode_directional": re.compile(
         r"[‪-‮⁦-⁩‏‎]"
     ),
     "instruction_override": re.compile(
-        r"(?mi)^(new\s+instructions?|IMPORTANT|CRITICAL|override|system|admin|root)\s*:"
+        r"(?mi)^(new\s+(?:instructions?|directives?|policy|policies|orders?|mandate|protocol)"
+        r"|IMPORTANT|CRITICAL|override|system|admin|root)\s*(?::|[-–—]\s)"
     ),
     "claude_md_override": re.compile(
         r"(?i)(ignore\s+CLAUDE\.md|override\s+project\s+rules?"
@@ -96,27 +107,51 @@ INJECTION_PATTERNS = {
 EXCESSIVE_PRIVILEGE_PATTERNS = {
     "unbounded_delegation": re.compile(
         r"(?i)(spawn\s+(as\s+many|unlimited|any\s+number\s+of)\s+"
-        r"(sub-?agents?|agents?|workers?)"
+        r"(?:\w+\s+){0,2}(sub-?agents?|agents?|workers?)"
         r"|unlimited\s+(sub-?agents?|delegation|recursion))"
     ),
     "full_tool_access": re.compile(
-        r"(?i)(access\s+to\s+all\s+tools|use\s+any\s+tool"
-        r"|all\s+tools?\s+(available|enabled|allowed)"
+        r"(?i)(access\s+to\s+(?:all|every|any)\s+tools?"
+        r"|use\s+(?:any|every|all|whatever|whichever)\s+(?:available\s+)?tools?"
+        r"|(?:all|every)\s+tools?\s+(available|enabled|allowed)"
         r"|grant\s+(full|complete|unrestricted)\s+(tool\s+)?access)"
     ),
     "raw_shell_in_prompt": re.compile(
-        r"`[^`]*(rm\s+-rf|chmod\s+777|curl\s+.*\|\s*bash|sudo\s+)[^`]*`"
+        r"(?i)(?:`[^`]*(?:rm\s+-rf|chmod\s+777|curl\s+.*\|\s*bash|sudo\s+)[^`]*`"
+        r"|\b(?:curl|wget)\b[^\n`]{0,200}\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b)"
     ),
     "dangerous_permissions_text": re.compile(
         r"(?i)(dangerously-?skip-?permissions|bypassPermissions|--no-verify)"
+    ),
+    "oversight_removal": re.compile(
+        r"(?i)("
+        r"no\s+(?:human\s+|user\s+|manual\s+|further\s+|explicit\s+|prior\s+)?"
+        r"(?:approvals?|confirmations?|permissions?|oversight|sign-?offs?)\s+"
+        r"(?:is\s+|are\s+|will\s+be\s+)?(?:needed|required|necessary|expected)"
+        r"|without\s+(?:ever\s+)?(?:seeking|asking\s+for|waiting\s+for|requiring"
+        r"|needing|getting|obtaining|requesting)\s+"
+        r"(?:human\s+|user\s+|my\s+|your\s+|any\s+|prior\s+|further\s+)*"
+        r"(?:approvals?|confirmations?|permissions?|sign-?offs?|oversight|reviews?)"
+        r"|without\s+(?:human\s+|adult\s+|manual\s+)?(?:oversight|supervision)"
+        r")"
     ),
 }
 
 EXFIL_PATTERNS = {
     "exfil_domain": re.compile(
-        r"(ngrok\.io|requestbin\.com|hookbin\.com|pipedream\.net"
-        r"|burpcollaborator\.net|interact\.sh|canarytokens\.com"
-        r"|webhook\.site)"
+        r"(ngrok\.io|ngrok-free\.app|ngrok\.app|requestbin\.com|hookbin\.com"
+        r"|pipedream\.net|burpcollaborator\.net|interact\.sh|canarytokens\.com"
+        r"|webhook\.site|trycloudflare\.com|oastify\.com|serveo\.net"
+        r"|localtunnel\.me)"
+    ),
+    "exfil_url": re.compile(
+        r"(?i)("
+        r"(exfiltrate|exfil|smuggle|leak)\b[^.\n]{0,80}?https?://"
+        r"|(post|send|upload|transmit|deliver|paste|dump)\b[^.\n]{0,50}?"
+        r"\b(findings?|results?|output|report|data|contents?|credentials?"
+        r"|secrets?|tokens?|keys?|responses?|everything|logs?)\b"
+        r"[^.\n]{0,50}?\b(?:to|at|into|toward)\s+https?://"
+        r")"
     ),
     "base64_blob": re.compile(r"[A-Za-z0-9+/]{100,}={0,2}"),
     "encoded_url_data": re.compile(
@@ -125,9 +160,9 @@ EXFIL_PATTERNS = {
 }
 
 SENSITIVE_PATH_PATTERNS = re.compile(
-    r"(~|/home/\w+|/Users/\w+|/root)/"
+    r"(?:(?:~\w*|\$\{?HOME\}?|/home/\w+|/Users/\w+|/root)/|(?<!\w))"
     r"(\.(ssh|aws|gnupg|config/gcloud|netrc|docker/config\.json"
-    r"|kube/config|npmrc|pypirc|gem/credentials|git-credentials))"
+    r"|kube/config|npmrc|pypirc|gem/credentials|git-credentials))(?![\w])"
     r"|/etc/(shadow|passwd|sudoers)"
 )
 
@@ -189,10 +224,10 @@ def check_credentials(prompt: str) -> tuple[str, str, str] | None:
             match = pattern.search(line)
             if match:
                 matched_text = match.group(0)
-                if is_fake_value(matched_text, line):
+                is_high = name in HIGH_CONFIDENCE_CREDENTIAL_NAMES
+                if is_placeholder_credential(matched_text, line, is_high):
                     continue
                 redacted = matched_text[:8] + "..." + matched_text[-4:]
-                is_high = name in HIGH_CONFIDENCE_CREDENTIAL_NAMES
                 decision = "deny" if is_high else "ask"
                 confidence = "HIGH" if is_high else "LOW"
                 return (

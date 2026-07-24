@@ -17,32 +17,47 @@ import re
 import sys
 from pathlib import Path
 
-MAX_SCAN_BYTES = 102_400
-
 sys.path.insert(0, str(Path(__file__).parent))
 from patterns import MAX_STDIN_BYTES  # noqa: E402
-from credential_guard import CREDENTIAL_PATTERNS, is_fake_value  # noqa: E402
+from credential_guard import (  # noqa: E402
+    CREDENTIAL_PATTERNS,
+    FAKE_VALUE_PATTERNS,
+    is_fake_value,
+)
 from allowlist import is_suppressed  # noqa: E402
 from hook_logging import log_security_event  # noqa: E402
+
+# Scan the entire tool response, not just a leading prefix: a live credential
+# positioned past a large block of benign output (verbose logs, env dumps) must
+# still be caught. Bounded by MAX_STDIN_BYTES, the cap the hook reads under.
+MAX_SCAN_BYTES = MAX_STDIN_BYTES
 
 HIGH_CONFIDENCE = frozenset([
     "aws_access_key", "aws_sts_key", "anthropic_key", "github_token",
     "github_oauth_token", "github_server_token", "github_fine_grained",
     "gitlab_token", "npm_token", "private_key_header", "slack_token",
-    "stripe_key",
+    "stripe_key", "openai_key", "jwt_token",
 ])
 
 LOW_CONFIDENCE = frozenset([
-    "openai_key", "jwt_token", "generic_secret", "password_assignment",
+    "generic_secret", "password_assignment",
 ])
 
 # head/tail are intentionally NOT here: they are common ways to read a
 # credential file, so their output must still be scanned for secrets.
+# git subcommands that PRINT FILE CONTENTS or patch hunks (``diff``, ``show``,
+# ``blame``, and ``log -p``) are likewise excluded — a committed secret is
+# routinely surfaced there and must still be scanned/redacted. ``git log``
+# without a patch flag prints only commit metadata, so it stays safe.
 SAFE_SIMPLE_COMMANDS = re.compile(
-    r"^\s*(git\s+(log|diff|status|show|branch|remote|tag|rev-parse|blame)"
+    r"^\s*(git\s+(log|status|branch|remote|tag|rev-parse)"
     r"|ls\b|find\s|wc\s|pwd|which\s|type\s"
-    r"|mkdir\s|mv\s|cp\s|trash\s|stat\s|file\s|diff\s)"
+    r"|mkdir\s|mv\s|cp\s|trash\s|stat\s|file\s)"
 )
+
+# Patch-printing flags that make ``git log`` dump full diff hunks (and thus any
+# committed secret). Their presence downgrades ``git log`` from safe to scanned.
+GIT_PATCH_FLAG = re.compile(r"(?:^|\s)(?:-p|-u|-U\d*|--patch|--unified)\b")
 
 HAS_CHAINING = re.compile(r"[;&|]")
 
@@ -55,7 +70,11 @@ CREDENTIAL_SEARCH_INDICATORS = re.compile(
 def is_safe_command(command: str) -> bool:
     if HAS_CHAINING.search(command):
         return False
-    return bool(SAFE_SIMPLE_COMMANDS.match(command))
+    if not SAFE_SIMPLE_COMMANDS.match(command):
+        return False
+    if re.match(r"^\s*git\s+log\b", command) and GIT_PATCH_FLAG.search(command):
+        return False
+    return True
 
 
 def is_credential_search(command: str) -> bool:
@@ -93,12 +112,22 @@ def scan_output(text: str, command: str) -> dict | None:
             if any(s <= span[0] < e for s, e in matched_spans):
                 continue
             matched_text = match.group(0)
-            if is_fake_value(matched_text, line):
+            is_high = name in HIGH_CONFIDENCE
+            # High-confidence credentials are structurally self-authenticating:
+            # a real AKIA/ghp_/sk- value is not neutralized by a '# demo'
+            # comment an attacker can append to the output line. Only a fake
+            # token inside the value itself (AWS's own AKIAIOSFODNN7EXAMPLE)
+            # suppresses it. Low-confidence heuristic matches still honor the
+            # line-level comment context.
+            if is_high:
+                if FAKE_VALUE_PATTERNS.search(matched_text):
+                    continue
+            elif is_fake_value(matched_text, line):
                 continue
             if is_suppressed("output_credential_scanner", pattern_name=name):
                 continue
             matched_spans.add(span)
-            if name in HIGH_CONFIDENCE:
+            if is_high:
                 high_matches.append((name, matched_text))
             elif name in LOW_CONFIDENCE:
                 low_matches.append(name)
@@ -120,7 +149,7 @@ def scan_output(text: str, command: str) -> dict | None:
         f"set it as an environment variable."
     )
 
-    if high_matches and not intentional_search:
+    if high_matches:
         redacted_text = text
         for name, matched_text in high_matches:
             redacted_text = redacted_text.replace(
@@ -130,15 +159,15 @@ def scan_output(text: str, command: str) -> dict | None:
             "output_credential_scanner", "redact",
             pattern_matched=",".join(set(m[0] for m in high_matches)),
             command=command_prefix,
+            extra={"intentional_search": intentional_search},
         )
         return {
             "hookSpecificOutput": {"updatedToolOutput": redacted_text},
             "systemMessage": msg,
         }
 
-    decision = "warn_high" if high_matches else "warn_low"
     log_security_event(
-        "output_credential_scanner", decision,
+        "output_credential_scanner", "warn_low",
         pattern_matched=",".join(set(pattern_names)),
         command=command_prefix,
     )

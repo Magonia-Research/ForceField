@@ -5,11 +5,31 @@ Detects typosquatting and dangerous package-install patterns, returning "ask"
 (or "deny" for the zero-false-positive patterns). Imported by
 ``security_dispatcher``, which owns the stdin/stdout plumbing, allowlist
 suppression, and logging.
+
+Installer and fetch-execute patterns are matched against both the raw command
+and a normalized form (``normalize_command``) so shell obfuscation
+(``p\\ip install``, ``pip${IFS}install``, ``curl ... | no\\de``) cannot evade a
+literal-anchored pattern. The allowlist deliberately still sees only the raw
+command.
 """
 
 from __future__ import annotations
 
 import re
+
+try:
+    from normalize import normalize_command
+except Exception:  # pragma: no cover - fail-open if the module is unavailable
+    def normalize_command(command: str) -> str:
+        return command
+
+
+def _detection_variants(command: str) -> tuple[str, ...]:
+    """Return the raw command plus its normalized form, deduplicated."""
+    normalized = normalize_command(command)
+    if normalized == command:
+        return (command,)
+    return (command, normalized)
 
 
 def damerau_levenshtein(s: str, t: str) -> int:
@@ -90,7 +110,7 @@ POPULAR_CARGO: frozenset[str] = frozenset([
 # Map installer regex → popular package set
 _ECOSYSTEM_MAP: list[tuple[re.Pattern[str], frozenset[str]]] = [
     (re.compile(r"pip3?\s+install\s+"), POPULAR_PYPI),
-    (re.compile(r"(uvx|pipx\s+install|pipx\s+run)\s+"), POPULAR_PYPI),
+    (re.compile(r"(uvx|pipx\s+install|pipx\s+run|uv\s+add|poetry\s+add)\s+"), POPULAR_PYPI),
     (re.compile(r"(npm\s+install|pnpm\s+add|yarn\s+add)\s+"), POPULAR_NPM),
     (re.compile(r"(npx|bunx|pnpm\s+dlx|yarn\s+dlx)\s+"), POPULAR_NPM),
     (re.compile(r"cargo\s+(install|add)\s+"), POPULAR_CARGO),
@@ -129,7 +149,7 @@ TYPOSQUAT_CHECKS: list[tuple[re.Pattern[str], list[tuple[re.Pattern[str], str]]]
         (re.compile(r"creat-react-app"), "create-react-app"),
         (re.compile(r"create-raect-app"), "create-react-app"),
     ]),
-    (re.compile(r"(uvx|pipx\s+install|pipx\s+run)\s+"), [
+    (re.compile(r"(uvx|pipx\s+install|pipx\s+run|uv\s+add|poetry\s+add)\s+"), [
         (re.compile(r"requets"), "requests"),
         (re.compile(r"beautifulsoup\b"), "beautifulsoup4"),
         (re.compile(r"colorsama"), "colorama"),
@@ -144,25 +164,96 @@ TYPOSQUAT_CHECKS: list[tuple[re.Pattern[str], list[tuple[re.Pattern[str], str]]]
 ]
 
 # Fetchers and interpreters shared by the fetch-execute detectors below.
-_FETCHER = r"(?:curl|wget|fetch|aria2c)"
+# ``wget2`` (the GNU Wget successor) has no word boundary after ``wget``, so it
+# is spelled explicitly rather than left to ``wget\b``.
+_FETCHER = r"(?:curl|wget2?|fetch|aria2c)"
+# httpie ships ``http``/``https`` CLIs. They are recognized only at command
+# position (start of line or right after a shell separator) and when followed by
+# whitespace, so a bare URL (``https://…``) or the word "http" inside an argument
+# can never be mistaken for the fetcher — that keeps the pipe-to-shell hard deny
+# free of false positives.
+_HTTPIE = r"(?:^|[;&|(\n{])\s*https?(?=\s)"
 _INTERP = (
-    r"(?:bash|sh|zsh|dash|ash|ksh|/bin/(?:ba)?sh|python[23]?|python|ruby|perl"
-    r"|node|deno|php|pwsh|powershell|eval)"
+    r"(?:bash|sh|zsh|dash|ash|ksh|fish|/bin/(?:ba)?sh|python[23]?|python|ruby"
+    r"|perl|node|deno|php|pwsh|powershell|tclsh|lua|Rscript|julia|nu|eval)"
+)
+
+# Transparent command wrappers: each execs the command that follows it, so an
+# interpreter positioned after one still executes the piped fetch. The set is
+# kept closed to genuinely pass-through wrappers whose non-flag arguments are the
+# command itself, so a non-wrapper such as ``grep`` (or a wrapper with a leading
+# non-command arg such as ``timeout 5``) can never sit between the pipe and the
+# interpreter and be treated as one — that is what keeps the hard deny
+# zero-false-positive.
+_PIPE_WRAPPER = r"(?:sudo|doas|env|xargs|nohup|setsid|stdbuf)"
+# One prefix unit permitted between the pipe and the interpreter: an environment
+# assignment (``PYTHONPATH=/tmp``), a transparent wrapper, or a flag optionally
+# consuming a single bareword argument (``sudo -E``, ``xargs -I S``,
+# ``sudo -u nobody``). A bareword is only ever consumed as a flag's argument, so
+# ``curl ... | grep bash`` (``bash`` as data, not a command) never matches.
+_PIPE_PREFIX_UNIT = (
+    r"(?:[A-Za-z_]\w*=\S*"
+    r"|" + _PIPE_WRAPPER + r"\b"
+    r"|-{1,2}\S+(?:\s+[^-\s]\S*)?)"
 )
 
 DANGEROUS_INSTALL = {
     "pipe_to_shell": re.compile(
-        r"" + _FETCHER + r"\b[^\n]*\|\s*(?:sudo\s+|env\s+|xargs\s+)*" + _INTERP + r"\b"
+        # fetch piped into an interpreter, tolerating env-assignment and
+        # transparent-wrapper prefixes (with their flags) between the pipe and
+        # the interpreter: ``| sudo -E bash``, ``| PYTHONPATH=/tmp python3``,
+        # ``| xargs -I S sh``. The fetcher may be curl/wget(2)/etc. or an httpie
+        # ``http``/``https`` invocation at command position.
+        r"(?:" + _FETCHER + r"\b|" + _HTTPIE + r")[^\n]*\|\s*(?:"
+        + _PIPE_PREFIX_UNIT + r"\s+)*" + _INTERP + r"\b"
     ),
     "fetch_exec_substitution": re.compile(
-        # an interpreter executing the output of a fetch via $(...) or <(...):
-        # bash -c "$(curl ...)", source <(curl ...), python3 -c "$(wget ...)"
-        r"(?:" + _INTERP + r"|source)\b[^\n]*(?:\$\(|<\()\s*[^\n)]*"
+        # an interpreter (or ``source``/``.``) executing the output of a fetch
+        # via $(...), <(...) or a legacy backtick substitution:
+        # bash -c "$(curl ...)", source <(curl ...), python3 -c "$(wget ...)",
+        # bash -c "`curl ...`", . <(curl ...). The (?<!\w) left-anchor stops a
+        # short interpreter token (nu, sh, lua) matching inside a longer word
+        # such as ``menu=$(curl …)``.
+        r"(?:"
+        r"(?<!\w)(?:" + _INTERP + r"|source)\b[^\n]*(?:\$\(|<\(|`)\s*[^\n)]*"
         r"\b" + _FETCHER + r"\b"
+        r"|"
+        # POSIX dot-source of a substituted fetch. The ``.`` must be a bare
+        # command (start of line or right after a separator) with the
+        # substitution directly after it, so ``. venv/bin/activate`` and
+        # ``diff . <(curl …)`` stay clean.
+        r"(?:^|[;&|(\n{])\s*\.\s+(?:\$\(|<\(|`)\s*[^\n)]*\b" + _FETCHER + r"\b"
+        r")"
+    ),
+    "fetch_var_exec": re.compile(
+        # fetch captured to a shell variable, then that same variable executed as
+        # code by an interpreter (``-c``) or ``eval`` — the assign-then-exec
+        # ordering that reverses fetch_exec_substitution:
+        #   x=$(curl ...); bash -c "$x"      /      v=`wget ...`; eval "$v"
+        # Ask, not deny: the captured value could instead be interpolated as data
+        # (``bash script.sh "$x"``), so this is not provably zero-false-positive.
+        r"([A-Za-z_]\w*)=(?:\$\(|`)[^\n]*\b" + _FETCHER + r"\b[^\n]*"
+        r"(?<!\w)(?:" + _INTERP + r"\s+(?:-\S+\s+)*-c\b|eval\b)[^\n]*\$\{?\1\b"
     ),
     "fetch_then_exec": re.compile(
-        # download to a file, then run that file in the same command chain
-        r"" + _FETCHER + r"\b[^\n]*\s-[oO]\b[^\n]*&&[^\n]*(?:" + _INTERP + r"|source)\b"
+        # download to a file, then run that file — two shapes, both ask (the file
+        # is on disk and can be inspected first):
+        #   (1) same line, any sequencer after an ``-o``/``-O`` write:
+        #       ``curl -o f URL; sh f`` / ``… && …`` / ``… || …`` (keeps the
+        #       original -O remote-name coverage).
+        #   (2) the SAME downloaded file executed later — across a newline or any
+        #       separator, and including a ``>``/``>>`` redirect target.
+        #       Correlating on the filename keeps the newline-crossing form from
+        #       over-asking on an unrelated later interpreter or a fetched *data*
+        #       file consumed as an argument.
+        r"(?:"
+        + _FETCHER + r"\b[^\n]*\s-[oO]\b[^\n]*?(?:&&|\|\||;)[^\n]*?"
+        r"(?<!\w)(?:" + _INTERP + r"|source)\b"
+        r"|"
+        + _FETCHER + r"\b[^\n]*?(?:\s-[oO]\s+|>>?\s*)(?P<f>[^\s;&|<>()'`]+)"
+        r"[\s\S]*?(?<!\w)(?:" + _INTERP + r"|source|\.)\s+(?:-\S+\s+)*"
+        r"(?P=f)(?!\w)"
+        r")"
     ),
     "pip_url_install": re.compile(
         r"pip3?\s+install\s+https?://"
@@ -173,8 +264,22 @@ DANGEROUS_INSTALL = {
     "npx_url_exec": re.compile(
         r"(npx|bunx|pnpm\s+dlx|yarn\s+dlx)\s+https?://"
     ),
-    "npx_scoped_unknown": re.compile(
-        r"(npx|bunx|pnpm\s+dlx|yarn\s+dlx)\s+@[^/]+/[^\s]+.*--yes"
+    "npx_auto_run": re.compile(
+        # npx/bunx/dlx auto-approving a package run via --yes (anywhere) or npx's
+        # own -y flag (immediately after the command). Covers scoped AND unscoped
+        # names; the explicit ``npx --package=`` form is waved through by the
+        # allowlist. -y is only honored as npx's flag in command position, so a
+        # trailing ``tool -y`` (the tool's own flag) is not mistaken for it.
+        r"(npx|bunx|pnpm\s+dlx|yarn\s+dlx)(?:\s+-y\b|\b[^\n]*\s--yes\b)"
+    ),
+    "insecure_registry": re.compile(
+        # install redirected to a plaintext (http://) package registry/index —
+        # the registry-substitution / dependency-confusion vector. https mirrors
+        # (pytorch, corporate registries, test indexes) are the legitimate case
+        # and are deliberately not matched, so this never over-asks on them.
+        r"(?:--registry|--index-url|--extra-index-url)(?:\s+|=)http://"
+        r"|(?:pip3?|uv|pipx)\s+(?:pip\s+)?(?:install|add)\b[^\n;&|]*"
+        r"\s-i(?:=|\s+)http://"
     ),
     "uvx_url_exec": re.compile(
         r"(uvx|pipx\s+run)\s+https?://"
@@ -204,6 +309,48 @@ def is_allowlisted(command: str) -> bool:
         if pattern.search(command):
             return True
     return False
+
+
+# Top-level shell separators, used to bound the command allowlist to the single
+# segment that carries a danger. Deliberately naive — it ignores quoting and
+# subshells — because the wave-through requires a segment to MATCH an allowlist
+# pattern before it can clear a danger, so an over-split only ever makes the
+# guard stricter, never more permissive.
+_SHELL_SEPARATORS = re.compile(r"\|\||&&|[;|\n]")
+
+
+def _shell_segments(command: str) -> list[str]:
+    """Split a command on top-level shell separators (``;`` ``&&`` ``||`` ``|`` newline)."""
+    return [seg for seg in _SHELL_SEPARATORS.split(command) if seg.strip()]
+
+
+def _segment_matches_pattern(segment: str, pattern_name: str) -> bool:
+    """Whether the named dangerous pattern fires on this segment (raw or normalized)."""
+    pattern = DANGEROUS_INSTALL.get(pattern_name)
+    if pattern is None:
+        return False
+    for text in _detection_variants(segment):
+        if pattern.search(text):
+            return True
+    return False
+
+
+def allowlist_clears_danger(command: str, pattern_name: str) -> bool:
+    """Whether the command allowlist may wave through a detected danger.
+
+    The allowlist clears a danger ONLY when every shell segment that carries that
+    danger is itself allowlisted. A benign allowlisted install in one segment can
+    no longer launder a dangerous segment elsewhere in a compound command, and a
+    danger that spans separators (fetch-then-exec, fetch-var-exec) — which no
+    single segment reproduces — is never cleared.
+    """
+    carriers = [
+        seg for seg in _shell_segments(command)
+        if _segment_matches_pattern(seg, pattern_name)
+    ]
+    if not carriers:
+        return False
+    return all(is_allowlisted(seg) for seg in carriers)
 
 
 _PKG_VERSION_STRIP = re.compile(r"[=<>!@\[].*")
@@ -251,6 +398,19 @@ def _check_dl_against_ecosystem(
 def check_typosquat(command: str) -> tuple[str, str, str] | None:
     """Return (typo, correct_package, installer) or None.
 
+    Scans both the raw command and its normalized form so an installer token
+    broken by an escape/quote/``${IFS}`` (``p\\ip install``) is still detected.
+    """
+    for text in _detection_variants(command):
+        result = _check_typosquat_single(text)
+        if result:
+            return result
+    return None
+
+
+def _check_typosquat_single(command: str) -> tuple[str, str, str] | None:
+    """Typosquat detection for a single command string.
+
     Two-pass detection:
     1. Regex — known-bad typos (zero false positives)
     2. Damerau-Levenshtein — novel typos against popular packages
@@ -297,22 +457,32 @@ HARD_DENY_PATTERNS: frozenset[str] = frozenset([
 
 
 def check_dangerous(command: str) -> tuple[str, str] | None:
-    """Return (pattern_name, matched_text) or None."""
+    """Return (pattern_name, matched_text) or None.
+
+    Each pattern is tested against both the raw command and its normalized form,
+    so an obfuscated fetch-execute (``curl ... | no\\de``) is still caught.
+    Dict order puts the hard-deny patterns first, so a deny wins over an
+    overlapping ask on the same command.
+    """
+    variants = _detection_variants(command)
     for name, pattern in DANGEROUS_INSTALL.items():
-        match = pattern.search(command)
-        if match:
-            return (name, match.group(0))
+        for text in variants:
+            match = pattern.search(text)
+            if match:
+                return (name, match.group(0))
     return None
 
 
 DANGER_DESCRIPTIONS = {
     "pipe_to_shell": "Piping remote script directly to shell",
     "fetch_exec_substitution": "Executing fetched content via command/process substitution",
+    "fetch_var_exec": "Running a fetched script captured to a shell variable",
     "fetch_then_exec": "Downloading a script to a file and running it in one step",
     "pip_url_install": "Installing Python package from arbitrary URL",
     "npm_url_install": "Installing npm package from arbitrary URL",
     "npx_url_exec": "Executing package from arbitrary URL via npx/bunx",
-    "npx_scoped_unknown": "Auto-approving scoped package execution (--yes bypass)",
+    "npx_auto_run": "Auto-approving package execution (--yes/-y bypass)",
+    "insecure_registry": "Installing from a plaintext (http://) package registry/index",
     "uvx_url_exec": "Executing Python package from arbitrary URL via uvx/pipx",
     "force_scripts": "Force-enabling install scripts (bypasses safety)",
     "global_install": "Global package install (bypasses project isolation)",
@@ -322,11 +492,13 @@ DANGER_DESCRIPTIONS = {
 DANGER_ALTERNATIVES = {
     "pipe_to_shell": "Download first, inspect, then run: curl -o script.sh URL && cat script.sh && bash script.sh",
     "fetch_exec_substitution": "Download to a file, read it, then run it — never execute a fetch inline via $(...) or <(...)",
+    "fetch_var_exec": "Download to a file and inspect it before running — never assign a fetch to a variable and exec it",
     "fetch_then_exec": "Inspect the downloaded file before running it: curl -o s.sh URL && cat s.sh && bash s.sh",
     "pip_url_install": "Use a requirements file with hashes: uv pip install --require-hashes -r requirements.txt",
     "npm_url_install": "Add to package.json and audit: pnpm add <pkg> && pnpm audit",
     "npx_url_exec": "Install the package first with pnpm add, then run locally",
-    "npx_scoped_unknown": "Remove --yes flag to get interactive confirmation, or install the package first",
+    "npx_auto_run": "Remove --yes/-y to get interactive confirmation, or install the package first",
+    "insecure_registry": "Use the default https registry, or verify the http:// index is a trusted internal mirror",
     "uvx_url_exec": "Install with pipx install <pkg> first, then run the installed binary",
     "force_scripts": "Remove --ignore-scripts=false and audit the package first",
     "global_install": "Use npx (Node) or pipx (Python) for isolated execution",

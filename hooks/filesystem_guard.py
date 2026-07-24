@@ -44,39 +44,64 @@ from credential_access_guard import CREDENTIAL_ACCESS_PATTERNS  # noqa: E402
 
 _WRITE_TOOLS = frozenset(["Write", "Edit", "MultiEdit", "NotebookEdit"])
 
-# Sensitive write sinks, matched against the canonical absolute path.
+# Sensitive write sinks, matched against the canonical absolute path. Sources are
+# compiled with re.IGNORECASE: on darwin/Windows the filesystem is case-insensitive
+# and os.path.realpath preserves the as-typed case, so ``~/.SSH/authorized_keys``
+# writes the same file as ``~/.ssh/authorized_keys`` and must match too.
+_WRITE_SINK_SOURCES: dict[str, str] = {
+    "ssh_authorized_keys": r"/\.ssh/authorized_keys$",
+    "ssh_dir": r"/\.ssh/",
+    "aws_dir": r"/\.aws/",
+    "gnupg_dir": r"/\.gnupg/",
+    "gcloud_dir": r"/\.config/gcloud/",
+    "kube_dir": r"/\.kube/",
+    "docker_config": r"/\.docker/config\.json$",
+    "npmrc": r"/\.npmrc$",
+    "pypirc": r"/\.pypirc$",
+    "netrc": r"/\.netrc$",
+    "git_credentials": r"/\.git-credentials$",
+    "shell_init": r"/\.(?:bashrc|zshrc|bash_profile|zprofile|profile|bash_login|bash_logout|zshenv|zlogin|zlogout|bash_aliases)$",
+    "fish_init": r"/\.config/fish/(?:config\.fish$|conf\.d/)",
+    "git_hooks": r"/\.git/hooks/",
+    "git_config_file": r"/\.git/config$",
+    "git_global_config": r"/\.gitconfig$|/\.config/git/config$",
+    "launch_agents": r"/Library/(?:LaunchAgents|LaunchDaemons)/",
+    "autostart": r"/\.config/autostart/",
+    "cron": r"/(?:etc/cron|etc/crontab|var/at/|var/spool/cron)",
+    "systemd_unit": r"/(?:etc|lib|usr/lib)/systemd/system/|/systemd/user/",
+    "rc_local": r"/etc/rc\.local$",
+    "etc_sensitive": (
+        r"/etc/(?:sudoers|sudoers\.d/|passwd|shadow|hosts|profile|environment|"
+        r"pam\.d/|ld\.so\.preload|ld\.so\.conf)"
+    ),
+}
 WRITE_SINK_PATTERNS: dict[str, re.Pattern[str]] = {
-    "ssh_authorized_keys": re.compile(r"/\.ssh/authorized_keys$"),
-    "ssh_dir": re.compile(r"/\.ssh/"),
-    "aws_dir": re.compile(r"/\.aws/"),
-    "gnupg_dir": re.compile(r"/\.gnupg/"),
-    "gcloud_dir": re.compile(r"/\.config/gcloud/"),
-    "kube_dir": re.compile(r"/\.kube/"),
-    "docker_config": re.compile(r"/\.docker/config\.json$"),
-    "npmrc": re.compile(r"/\.npmrc$"),
-    "pypirc": re.compile(r"/\.pypirc$"),
-    "netrc": re.compile(r"/\.netrc$"),
-    "git_credentials": re.compile(r"/\.git-credentials$"),
-    "shell_init": re.compile(
-        r"/\.(?:bashrc|zshrc|bash_profile|zprofile|profile|bash_login|zshenv|zlogin)$"
-    ),
-    "git_hooks": re.compile(r"/\.git/hooks/"),
-    "git_config_file": re.compile(r"/\.git/config$"),
-    "launch_agents": re.compile(r"/Library/(?:LaunchAgents|LaunchDaemons)/"),
-    "autostart": re.compile(r"/\.config/autostart/"),
-    "cron": re.compile(r"/(?:etc/cron|etc/crontab|var/at/|var/spool/cron)"),
-    "systemd_unit": re.compile(r"/(?:etc|lib|usr/lib)/systemd/system/"),
-    "etc_sensitive": re.compile(
-        r"/etc/(?:sudoers|sudoers\.d/|passwd|shadow|hosts|profile|environment|pam\.d/)"
-    ),
+    name: re.compile(src, re.IGNORECASE) for name, src in _WRITE_SINK_SOURCES.items()
 }
 
 # Security-config self-protection: writing these could suppress or disable
-# Portcullis. Matched against the canonical path.
+# Portcullis. Matched (case-insensitively) against the canonical path.
+_CONFIG_SINK_SOURCES: dict[str, str] = {
+    "claude_settings": r"/\.claude/settings(?:\.local)?\.json$",
+    "hook_allowlist": r"/\.claude/hook-allowlist\.json$",
+    "portcullis_config": r"/\.claude/portcullis\.json$",
+    "mcp_config": r"/\.mcp\.json$",
+}
 CONFIG_SINK_PATTERNS: dict[str, re.Pattern[str]] = {
-    "claude_settings": re.compile(r"/\.claude/settings(?:\.local)?\.json$"),
-    "hook_allowlist": re.compile(r"/\.claude/hook-allowlist\.json$"),
-    "portcullis_config": re.compile(r"/\.claude/portcullis\.json$"),
+    name: re.compile(src, re.IGNORECASE) for name, src in _CONFIG_SINK_SOURCES.items()
+}
+
+# Credential stores read via the Read tool that the shared CREDENTIAL_ACCESS_PATTERNS
+# (tuned for Bash command strings) does not carry. Anchored to the canonical path so
+# a Read never dumps these secrets into the transcript; kept dotfile-precise so plain
+# project files named ``my.cnf`` do not over-ask.
+_READ_SINK_SOURCES: dict[str, str] = {
+    "mysql_cnf": r"/\.my\.cnf$",
+    "terraform_credentials": r"/\.terraform\.d/credentials\.tfrc\.json$",
+    "git_credentials_xdg": r"/\.config/git/credentials$",
+}
+READ_SINK_PATTERNS: dict[str, re.Pattern[str]] = {
+    name: re.compile(src, re.IGNORECASE) for name, src in _READ_SINK_SOURCES.items()
 }
 
 # All findings are "ask" — every one of these paths has a legitimate use, so a
@@ -96,17 +121,24 @@ PATTERN_RISKS = {
     "netrc": "Writing .netrc can inject stored login credentials",
     "git_credentials": "Writing .git-credentials can inject stored git passwords",
     "shell_init": "Writing a shell init file runs code on every new shell",
+    "fish_init": "Writing a fish init/conf.d file runs code on every new fish shell",
     "git_hooks": "Writing a .git/hooks script runs code on git operations",
     "git_config_file": "Writing .git/config can set hooks/aliases that execute code",
+    "git_global_config": "Writing global git config can run code via aliases on any git command",
     "launch_agents": "Writing a Launch Agent/Daemon installs persistence",
     "autostart": "Writing an autostart entry installs persistence",
     "cron": "Writing a cron/at job installs scheduled execution",
     "systemd_unit": "Writing a systemd unit installs persistence",
+    "rc_local": "Writing /etc/rc.local installs a boot-time persistence script",
     "etc_sensitive": "Writing to a sensitive /etc file alters system auth/identity",
     "claude_settings": "Writing Claude Code settings can disable security hooks",
     "hook_allowlist": "Writing hook-allowlist.json can suppress security guards",
     "portcullis_config": "Writing portcullis.json can loosen or disable guards",
+    "mcp_config": "Writing .mcp.json registers MCP server commands Claude Code can spawn",
     "portcullis_plugin": "Writing into the installed Portcullis plugin tampers with the guards themselves",
+    "mysql_cnf": "Reading ~/.my.cnf exposes stored MySQL/MariaDB credentials",
+    "terraform_credentials": "Reading the Terraform credentials file exposes cloud API tokens",
+    "git_credentials_xdg": "Reading the XDG git credential store exposes stored git passwords",
 }
 
 
@@ -159,6 +191,9 @@ def check_read_path(path: str) -> tuple[str, str] | None:
     if not canonical:
         return None
     for name, pattern in CREDENTIAL_ACCESS_PATTERNS.items():
+        if pattern.search(canonical) or pattern.search(path):
+            return (name, canonical)
+    for name, pattern in READ_SINK_PATTERNS.items():
         if pattern.search(canonical) or pattern.search(path):
             return (name, canonical)
     return None

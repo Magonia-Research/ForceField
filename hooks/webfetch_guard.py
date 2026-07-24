@@ -16,10 +16,12 @@ Output: JSON on stdout (hook response)
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).parent))
 from patterns import MAX_STDIN_BYTES  # noqa: E402
@@ -43,12 +45,22 @@ URL_PATTERNS = {
         r"[?&][^=&]+=(?:[A-Za-z0-9+/]{40,}={0,2}|[0-9a-fA-F]{40,})"
     ),
     "sensitive_param": re.compile(
-        r"[?&](data|secret|password|passwd|token|auth|access[-_]?token"
-        r"|api[-_]?key|apikey|private[-_]?key)=",
+        r"[?&](data|secret|password|passwd|pw|pwd|token|auth|access[-_]?token"
+        r"|api[-_]?key|apikey|private[-_]?key|session(?:[-_]?id)?|sid|cookie"
+        r"|jwt|bearer|credentials?)=",
         re.IGNORECASE,
     ),
     "long_query_value": re.compile(r"[?&][^=&]+=[^=&\s]{80,}"),
 }
+
+# F2: the query detectors above anchor on ``[?&]``, so a base64 blob smuggled in
+# a path segment escaped every check. A pure-alphanumeric run of >=48 chars that
+# mixes letter case AND contains a digit is the signature of base64-encoded
+# binary. Excluding ``-``/``_``/``+``/``/`` keeps hyphen/underscore slugs and
+# article titles (their separators break the run) from matching, and requiring a
+# digit plus mixed case spares single-case hex hashes (git SHAs, content
+# digests) and shorter file identifiers (Drive/Docs IDs are < 48 chars).
+_PATH_BLOB = re.compile(r"[A-Za-z0-9]{48,}")
 
 # SSRF: the request DESTINATION host itself is dangerous — cloud metadata
 # endpoints, loopback, private ranges, link-local, *.internal/*.local, and
@@ -75,6 +87,90 @@ _SSRF_PRIVATE = re.compile(
 )
 _SSRF_ENCODED = re.compile(r"^(?:0x[0-9A-Fa-f]+|0[0-7]+|\d{8,10})$")
 
+# Cloud instance-metadata addresses, compared against a canonicalized IP so that
+# re-encodings (IPv4-mapped IPv6, short/octal/hex forms) resolve to the same key.
+_METADATA_IPS = frozenset(
+    ipaddress.ip_address(a)
+    for a in ("169.254.169.254", "169.254.170.2", "100.100.100.200", "fd00:ec2::254")
+)
+
+
+def _parse_ipv4_octet(part: str) -> int | None:
+    """Parse one inet_aton IPv4 field (decimal, ``0``-octal, or ``0x``-hex)."""
+    lowered = part.lower()
+    try:
+        if lowered.startswith("0x"):
+            return int(part, 16) if len(part) > 2 else None
+        if part.startswith("0") and len(part) > 1:
+            return int(part, 8)
+        return int(part, 10)
+    except ValueError:
+        return None
+
+
+def _parse_obfuscated_ipv4(host: str) -> ipaddress.IPv4Address | None:
+    """Canonicalize an inet_aton-style IPv4 literal without any DNS resolution.
+
+    Handles the 2-, 3-, and 4-part dotted forms with decimal, octal, or hex
+    fields (e.g. ``127.1``, ``0177.0.0.1``, ``0x7f.0x0.0x0.0x1``). Single-field
+    forms are left to ``_SSRF_ENCODED``. Returns None for anything that is not a
+    purely-numeric dotted literal, so real hostnames fall through untouched.
+    """
+    parts = host.split(".")
+    if not 2 <= len(parts) <= 4:
+        return None
+    octets = []
+    for part in parts:
+        value = _parse_ipv4_octet(part)
+        if value is None or value < 0:
+            return None
+        octets.append(value)
+    packed = 0
+    for value in octets[:-1]:
+        if value > 0xFF:
+            return None
+        packed = (packed << 8) | value
+    trailing_bytes = 4 - (len(octets) - 1)
+    last = octets[-1]
+    if last >= (1 << (8 * trailing_bytes)):
+        return None
+    packed = (packed << (8 * trailing_bytes)) | last
+    try:
+        return ipaddress.IPv4Address(packed)
+    except ValueError:
+        return None
+
+
+def _classify_ip(ip: ipaddress._BaseAddress, private_name: str) -> str | None:
+    """Name the SSRF class of a canonicalized IP, unwrapping IPv4-mapped IPv6."""
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    if ip in _METADATA_IPS:
+        return "ssrf_metadata"
+    if ip.is_loopback or ip.is_private or ip.is_link_local:
+        return private_name
+    return None
+
+
+def _canonical_ssrf(host: str) -> str | None:
+    """Catch dangerous hosts that evade the literal regexes by re-encoding.
+
+    Covers IPv4-mapped / expanded / zero-compressed IPv6 and inet_aton-style
+    obfuscated IPv4. Public destinations return None so legitimate fetches to
+    numeric hosts are never flagged.
+    """
+    if ":" in host:
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return None
+        return _classify_ip(ip, "ssrf_private_host")
+    ipv4 = _parse_obfuscated_ipv4(host)
+    if ipv4 is None:
+        return None
+    return _classify_ip(ipv4, "ssrf_encoded_ip")
+
 
 def _ssrf_host(url: str) -> tuple[str, str] | None:
     """Return an (ssrf_name, raw_host) detection for a dangerous destination host."""
@@ -89,6 +185,9 @@ def _ssrf_host(url: str) -> tuple[str, str] | None:
         return ("ssrf_private_host", raw_host)
     if _SSRF_ENCODED.match(host):
         return ("ssrf_encoded_ip", raw_host)
+    encoded = _canonical_ssrf(host)
+    if encoded:
+        return (encoded, raw_host)
     return None
 
 
@@ -103,9 +202,29 @@ PATTERN_RISKS = {
     "ssrf_encoded_ip": "Request to an obfuscated (decimal/hex/octal) IP address (SSRF)",
     "credential_in_url": "Credential or token embedded in the URL",
     "encoded_data_in_url": "Base64/hex-encoded blob in a URL parameter",
-    "sensitive_param": "Sensitive keyword (data/secret/token/password) in a URL parameter",
+    "encoded_data_in_path": "Base64 blob smuggled in the URL path (possible exfiltration)",
+    "sensitive_param": "Sensitive keyword (secret/token/session/cookie/jwt) in a URL parameter",
     "long_query_value": "Unusually long URL parameter value (possible data smuggling)",
 }
+
+
+def _encoded_blob_in_path(url: str) -> str | None:
+    """Return a base64-looking blob smuggled in the URL path, else None.
+
+    Inspects only the path component (via ``urlsplit`` — no network), so a
+    private IP or ordinary token elsewhere in the URL is not considered.
+    """
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return None
+    for run in _PATH_BLOB.findall(path):
+        has_upper = any(c.isupper() for c in run)
+        has_lower = any(c.islower() for c in run)
+        has_digit = any(c.isdigit() for c in run)
+        if has_upper and has_lower and has_digit:
+            return run
+    return None
 
 
 def check_url(url: str) -> tuple[str, str] | None:
@@ -139,6 +258,10 @@ def check_url(url: str) -> tuple[str, str] | None:
         match = URL_PATTERNS[name].search(url)
         if match:
             return (name, match.group(0))
+
+    blob = _encoded_blob_in_path(url)
+    if blob:
+        return ("encoded_data_in_path", blob)
 
     return None
 

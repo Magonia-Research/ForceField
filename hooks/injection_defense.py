@@ -27,13 +27,22 @@ LINE_NUMBER_PREFIX = re.compile(r"^\s*\d+\t", re.MULTILINE)
 
 INJECTION_PATTERNS = {
     "role_manipulation": re.compile(
-        r"(?i)\b(you\s+are\s+now|pretend\s+you\s+are"
-        r"|act\s+as\s+if|roleplay\s+as)\b"
+        r"(?i)\b(?:you\s+are\s+now|you'?re\s+now|pretend\s+you\s+are"
+        r"|act\s+as\s+if|roleplay\s+as|assume\s+the\s+role\s+of"
+        r"|you\s+(?:will|must|shall|should|are\s+to)\s+(?:now\s+)?act\s+as)\b"
+    ),
+    "unrestricted_persona": re.compile(
+        r"(?i)\b(?:un-?restricted|un-?filtered|un-?censored|jailbroken)\s+"
+        r"(?:ai|assistant|chatbot|llm|persona)\b"
+        r"|\bno\s+content\s+polic(?:y|ies)\b"
     ),
     "instruction_override": re.compile(
-        r"(?i)(ignore\s+(previous|prior|all|your)\s+"
-        r"(instructions?|rules?|constraints?|context)"
-        r"|disregard\s+(safety|security|rules?|instructions?|constraints?)"
+        r"(?i)("
+        r"(?:ignore|disregard|override)\s+"
+        r"(?:(?:the|all|any|these|those|your|my|our|previous|prior|earlier|above"
+        r"|preceding|foregoing|existing|original|initial|system|current|real|actual)\s+)*"
+        r"(?:instructions?|rules?|constraints?|directives?|guidelines?|prompts?|context)"
+        r"|disregard\s+(?:safety|security)"
         r"|new\s+instructions?\s*:\s*\S)"
     ),
     "fake_structural_tags": re.compile(
@@ -43,7 +52,22 @@ INJECTION_PATTERNS = {
     "fake_approval": re.compile(
         r"(?i)(the\s+(admin|user|operator)\s+(has\s+)?approved"
         r"|permission\s+(has\s+been\s+)?granted"
-        r"|the\s+user\s+said\s+yes)"
+        r"|the\s+user\s+said\s+yes"
+        r"|pre[\s-]?approved\s+by"
+        r"|(?:proceed|continue|go\s+ahead|carry\s+on|do\s+(?:it|this|so))\s+"
+        r"(?:automatically\s+)?without\s+"
+        r"(?:asking|confirming|prompting|checking\s+with|consulting))"
+    ),
+    "data_exfiltration": re.compile(
+        r"(?i)\b(?:exfiltrat\w*|exfil|forward|upload|transmit|leak"
+        r"|dump(?:ing|ed|s)?|steal|smuggle|siphon)\b"
+        r"[^.\n]{0,40}?"
+        r"\b(?:credentials?|api[\s_-]?keys?|secret\s*keys?|secrets?"
+        r"|passwords?|passphrases?|auth(?:entication|orization)?\s*tokens?"
+        r"|access\s*tokens?|bearer\s*tokens?|session\s*tokens?"
+        r"|private\s*keys?|ssh\s*keys?|env(?:ironment)?\s*(?:variables?|vars?)"
+        r"|conversation\s*(?:transcript|history|log)?"
+        r"|chat\s*(?:transcript|history|log)|transcript)\b"
     ),
     "unicode_directional": re.compile(
         r"[‪-‮⁦-⁩‏‎]"
@@ -63,12 +87,17 @@ INJECTION_PATTERNS = {
         r"(?:ai|claude|assistant|language\s+model|gpt|llm)\b"
     ),
     "fake_conversation": re.compile(
-        r"(?i)(?:^|\n)\s*(?:human|user)\s*:\s*.+\n\s*(?:assistant|ai)\s*:"
+        r"(?i)(?:^|\n)\s*(?:human|user|system)\s*:\s*.+\n"
+        r"\s*(?:assistant|ai|claude|chatgpt|bot)\s*:"
     ),
     "prompt_extraction": re.compile(
-        r"(?i)(?:repeat|show|print|reveal|display)\s+"
-        r"(?:everything|all|the|your)\s+"
-        r"(?:above|instructions?|system\s+prompt|rules)"
+        r"(?i)\b(?:repeat|show|print|reveal|display|output|dump"
+        r"|regurgitate|return|give\s+me)\b\s+"
+        r"(?:me\s+|back\s+)?"
+        r"(?:everything|all|the|your|my)\s+"
+        r"(?:above\b"
+        r"|(?:\w+\s+){0,3}?(?:system\s+prompt|system\s+message|instructions?"
+        r"|initial\s+(?:instructions?|prompt)|rules?)\b)"
     ),
     "mode_escalation": re.compile(
         r"(?i)(?:developer|debug|admin|god)\s+mode\s+"

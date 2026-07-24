@@ -24,25 +24,45 @@ from hook_logging import log_security_event  # noqa: E402
 
 BLOCK_PATTERNS = frozenset(["private_key_header"])
 
+# Every high-confidence, distinctive-prefix token type carried by
+# ``CREDENTIAL_PATTERNS`` warns here. Low-confidence assignment patterns
+# (``generic_secret``, ``password_assignment``) and public-by-nature JWTs are
+# deliberately excluded to avoid over-warning; the ``is_fake_value`` /
+# ``has_nearby_fake_context`` heuristics still suppress documented placeholders.
 WARN_PATTERNS = frozenset([
-    "aws_access_key", "anthropic_key", "github_token",
-    "github_fine_grained", "slack_token", "stripe_key",
+    "openai_key", "anthropic_key",
+    "aws_access_key", "aws_sts_key",
+    "github_token", "github_oauth_token", "github_server_token",
+    "github_fine_grained", "gitlab_token", "npm_token",
+    "slack_token", "stripe_key",
 ])
 
 SUGGESTED_ENV_VARS = {
-    "aws_access_key": "AWS_ACCESS_KEY_ID",
+    "openai_key": "OPENAI_API_KEY",
     "anthropic_key": "ANTHROPIC_API_KEY",
+    "aws_access_key": "AWS_ACCESS_KEY_ID",
+    "aws_sts_key": "AWS_ACCESS_KEY_ID",
     "github_token": "GITHUB_TOKEN",
+    "github_oauth_token": "GITHUB_TOKEN",
+    "github_server_token": "GITHUB_TOKEN",
     "github_fine_grained": "GITHUB_TOKEN",
+    "gitlab_token": "GITLAB_TOKEN",
+    "npm_token": "NPM_TOKEN",
     "slack_token": "SLACK_TOKEN",
     "stripe_key": "STRIPE_API_KEY",
 }
 
 PATTERN_DESCRIPTIONS = {
-    "aws_access_key": "AWS access key",
+    "openai_key": "OpenAI API key",
     "anthropic_key": "Anthropic API key",
+    "aws_access_key": "AWS access key",
+    "aws_sts_key": "AWS STS temporary access key",
     "github_token": "GitHub personal access token",
+    "github_oauth_token": "GitHub OAuth token",
+    "github_server_token": "GitHub server-to-server token",
     "github_fine_grained": "GitHub fine-grained token",
+    "gitlab_token": "GitLab personal access token",
+    "npm_token": "npm access token",
     "slack_token": "Slack token",
     "stripe_key": "Stripe API key",
     "private_key_header": "private key",
@@ -72,15 +92,23 @@ def scan_prompt(prompt: str) -> dict | None:
                 continue
 
             matched_text = match.group(0)
-            if is_fake_value(matched_text, line):
-                continue
-            abs_pos = offset + match.start()
-            if has_nearby_fake_context(prompt, abs_pos):
-                continue
+            is_block = name in BLOCK_PATTERNS
+            # A private-key PEM header is unambiguous: no benign paste contains
+            # `-----BEGIN ... PRIVATE KEY-----`. The fake-context heuristics (a
+            # nearby 'test'/'demo' word, an inline comment) must NOT be able to
+            # defeat the block — one such word must not let a live key persist
+            # in conversation history. Warn patterns keep both heuristics to
+            # avoid over-warning on documented placeholder tokens.
+            if not is_block:
+                if is_fake_value(matched_text, line):
+                    continue
+                abs_pos = offset + match.start()
+                if has_nearby_fake_context(prompt, abs_pos):
+                    continue
             if is_suppressed("prompt_credential_guard", pattern_name=name):
                 continue
 
-            if name in BLOCK_PATTERNS:
+            if is_block:
                 log_security_event(
                     "prompt_credential_guard", "block",
                     pattern_matched=name,

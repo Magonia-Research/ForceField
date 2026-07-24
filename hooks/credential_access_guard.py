@@ -18,12 +18,28 @@ from __future__ import annotations
 
 import re
 
+try:
+    from normalize import normalize_command
+except Exception:  # pragma: no cover - fail-open if the module is unavailable
+    def normalize_command(command: str) -> str:
+        return command
+
 # A sensitive read requires BOTH a file-reading command AND a credential-store
 # target. Requiring a reader token keeps the false-positive rate low: ``rm .env``
 # or ``echo .env`` do not read the file, so they do not match here (they are
 # handled, if at all, by the other guards).
+#
+# Left boundary accepts a shell separator, a path prefix (``/bin/cat``), a
+# wrapping quote (``"cat"``) or a leading backslash (``\cat``); the raw+normalized
+# match (see ``check_command``) additionally undoes intra-word quote/backslash
+# splitting (``c""at``). The trailing lookahead requires the reader to be a whole
+# command word terminated by a separator/quote/redirect/EOL, so ``catalog`` and a
+# mid-path component (``/var/cat/x``) do not match while ``cat`` still does.
 _READERS = re.compile(
-    r"(?:^|[\s;&|(<`$])(?:cat|head|tail|less|more|bat|strings|xxd|od)\s",
+    r"(?:^|[\s;&|(<>`$/'\"\\])"
+    r"(?:cat|head|tail|less|more|bat|strings|xxd|od|hexdump"
+    r"|base64|base32|nl|sed|awk|dd|cut|tac|rev)"
+    r"(?=$|[\s'\"<>|;&)])",
     re.IGNORECASE,
 )
 
@@ -32,7 +48,7 @@ _READERS = re.compile(
 # secret files like ``.env`` and ``.env.local``.
 CREDENTIAL_ACCESS_PATTERNS: dict[str, re.Pattern[str]] = {
     "dotenv_file": re.compile(
-        r"\.env\b(?!\.(?:example|sample|template|dist|defaults?))",
+        r"\.env(?:rc)?\b(?!\.(?:example|sample|template|dist|defaults?))",
         re.IGNORECASE,
     ),
     "ssh_key": re.compile(r"\.ssh/", re.IGNORECASE),
@@ -45,12 +61,17 @@ CREDENTIAL_ACCESS_PATTERNS: dict[str, re.Pattern[str]] = {
     "netrc_file": re.compile(r"\.netrc\b", re.IGNORECASE),
     "npmrc_token": re.compile(r"\.npmrc\b", re.IGNORECASE),
     "pypirc_token": re.compile(r"\.pypirc\b", re.IGNORECASE),
-    "git_credentials": re.compile(r"\.git-credentials\b", re.IGNORECASE),
+    "pgpass_file": re.compile(r"\.pgpass\b", re.IGNORECASE),
+    "git_credentials": re.compile(
+        r"\.git-credentials\b|\.config/git/credentials\b", re.IGNORECASE
+    ),
     "docker_auth": re.compile(r"\.docker/config\.json\b", re.IGNORECASE),
     "kube_config": re.compile(r"\.kube/", re.IGNORECASE),
     "gh_token": re.compile(r"\.config/gh/", re.IGNORECASE),
     "azure_credentials": re.compile(r"\.azure/", re.IGNORECASE),
     "macos_keychain": re.compile(r"Library/Keychains/", re.IGNORECASE),
+    "shadow_file": re.compile(r"/etc/shadow\b", re.IGNORECASE),
+    "terraform_state": re.compile(r"\.tfstate\b", re.IGNORECASE),
 }
 
 # All findings are "ask" — reading a credential file has legitimate uses, so a
@@ -59,13 +80,22 @@ HARD_DENY_PATTERNS: frozenset[str] = frozenset()
 
 
 def check_command(command: str) -> tuple[str, str] | None:
-    """Return ``(pattern_name, matched_text)`` for a credential read, else None."""
-    if not _READERS.search(command):
-        return None
-    for name, pattern in CREDENTIAL_ACCESS_PATTERNS.items():
-        match = pattern.search(command)
-        if match:
-            return (name, match.group(0))
+    """Return ``(pattern_name, matched_text)`` for a credential read, else None.
+
+    Matches against both the raw command and its normalized form so shell
+    obfuscation (``\\cat``, ``c""at``, an ``${IFS}`` split) cannot hide the
+    reader token. Both the reader and a credential store must be present in the
+    same variant for a match.
+    """
+    normalized = normalize_command(command)
+    variants = (command,) if normalized == command else (command, normalized)
+    for text in variants:
+        if not _READERS.search(text):
+            continue
+        for name, pattern in CREDENTIAL_ACCESS_PATTERNS.items():
+            match = pattern.search(text)
+            if match:
+                return (name, match.group(0))
     return None
 
 
@@ -79,12 +109,15 @@ PATTERN_RISKS = {
     "netrc_file": "Reading .netrc exposes stored login credentials",
     "npmrc_token": "Reading .npmrc exposes the npm auth token",
     "pypirc_token": "Reading .pypirc exposes PyPI upload credentials",
-    "git_credentials": "Reading .git-credentials exposes stored git passwords",
+    "pgpass_file": "Reading .pgpass exposes stored PostgreSQL passwords",
+    "git_credentials": "Reading the git credential store exposes stored git passwords",
     "docker_auth": "Reading Docker config exposes registry auth tokens",
     "kube_config": "Reading kube config exposes cluster credentials",
     "gh_token": "Reading GitHub CLI config exposes the gh auth token",
     "azure_credentials": "Reading Azure config exposes cloud credentials",
     "macos_keychain": "Reading a macOS Keychain exposes stored secrets",
+    "shadow_file": "Reading /etc/shadow exposes hashed account passwords",
+    "terraform_state": "Reading Terraform state exposes plaintext resource secrets",
 }
 
 
