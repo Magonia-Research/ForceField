@@ -46,6 +46,7 @@ def _finish(
     command: str,
     pattern_name: str,
     reason: str,
+    session_id: str | None = None,
 ) -> dict[str, object] | None:
     """Clamp a guard's natural decision by config, log it, and build the response.
 
@@ -54,11 +55,11 @@ def _finish(
     """
     return clamp_and_emit(
         guard_name, natural_decision, reason,
-        pattern_matched=pattern_name, command=command,
+        pattern_matched=pattern_name, command=command, session_id=session_id,
     )
 
 
-def run_exfil_guard(command: str) -> dict[str, object] | None:
+def run_exfil_guard(command: str, session_id: str | None = None) -> dict[str, object] | None:
     """Run exfil guard checks. Returns response dict or None."""
     result = exfil_check(command)
     if result is None:
@@ -70,18 +71,18 @@ def run_exfil_guard(command: str) -> dict[str, object] | None:
         log_security_event(
             "exfil_guard", "allow",
             pattern_matched=pattern_name, command=command,
-            extra={"suppressed": True},
+            session_id=session_id, extra={"suppressed": True},
         )
         return None
 
     natural = "deny" if is_hard_deny else "ask"
     return _finish(
         "exfil_guard", natural, command, pattern_name,
-        exfil_format(pattern_name, matched_text),
+        exfil_format(pattern_name, matched_text), session_id,
     )
 
 
-def run_supply_chain_guard(command: str) -> dict[str, object] | None:
+def run_supply_chain_guard(command: str, session_id: str | None = None) -> dict[str, object] | None:
     """Run supply chain guard checks. Returns response dict or None."""
     typo_result = check_typosquat(command)
     if typo_result:
@@ -91,12 +92,12 @@ def run_supply_chain_guard(command: str) -> dict[str, object] | None:
             log_security_event(
                 "supply_chain_guard", "allow",
                 pattern_matched=pattern_key, command=command,
-                extra={"suppressed": True},
+                session_id=session_id, extra={"suppressed": True},
             )
             return None
         return _finish(
             "supply_chain_guard", "ask", command, pattern_key,
-            format_typosquat_alert(typo, correct, installer),
+            format_typosquat_alert(typo, correct, installer), session_id,
         )
 
     danger_result = check_dangerous(command)
@@ -115,19 +116,19 @@ def run_supply_chain_guard(command: str) -> dict[str, object] | None:
             log_security_event(
                 "supply_chain_guard", "allow",
                 pattern_matched=pattern_name, command=command,
-                extra={"suppressed": True},
+                session_id=session_id, extra={"suppressed": True},
             )
             return None
         natural = "deny" if is_hard_deny else "ask"
         return _finish(
             "supply_chain_guard", natural, command, pattern_name,
-            format_danger_alert(pattern_name, matched_text),
+            format_danger_alert(pattern_name, matched_text), session_id,
         )
 
     return None
 
 
-def run_git_guard(command: str) -> dict[str, object] | None:
+def run_git_guard(command: str, session_id: str | None = None) -> dict[str, object] | None:
     """Run git repo-execution guard checks. Returns response dict or None."""
     result = check_git(command)
     if result is None:
@@ -139,18 +140,18 @@ def run_git_guard(command: str) -> dict[str, object] | None:
         log_security_event(
             "git_guard", "allow",
             pattern_matched=pattern_name, command=command,
-            extra={"suppressed": True},
+            session_id=session_id, extra={"suppressed": True},
         )
         return None
 
     natural = "deny" if is_hard_deny else "ask"
     return _finish(
         "git_guard", natural, command, pattern_name,
-        git_format(pattern_name, matched_text),
+        git_format(pattern_name, matched_text), session_id,
     )
 
 
-def run_credential_access_guard(command: str) -> dict[str, object] | None:
+def run_credential_access_guard(command: str, session_id: str | None = None) -> dict[str, object] | None:
     """Run credential-file read guard checks. Returns response dict or None."""
     result = cred_access_check(command)
     if result is None:
@@ -162,14 +163,14 @@ def run_credential_access_guard(command: str) -> dict[str, object] | None:
         log_security_event(
             "credential_access_guard", "allow",
             pattern_matched=pattern_name, command=command,
-            extra={"suppressed": True},
+            session_id=session_id, extra={"suppressed": True},
         )
         return None
 
     natural = "deny" if is_hard_deny else "ask"
     return _finish(
         "credential_access_guard", natural, command, pattern_name,
-        cred_access_format(pattern_name, matched_text),
+        cred_access_format(pattern_name, matched_text), session_id,
     )
 
 
@@ -233,15 +234,18 @@ def main() -> None:
 
     tool_input = input_data.get("tool_input", {})
     command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
+    session_id = input_data.get("session_id")
+    if not isinstance(session_id, str):
+        session_id = None
 
     if not command:
         json.dump({}, sys.stdout)
         return
 
-    exfil_result = run_exfil_guard(command)
-    supply_result = run_supply_chain_guard(command)
-    git_result = run_git_guard(command)
-    cred_result = run_credential_access_guard(command)
+    exfil_result = run_exfil_guard(command, session_id)
+    supply_result = run_supply_chain_guard(command, session_id)
+    git_result = run_git_guard(command, session_id)
+    cred_result = run_credential_access_guard(command, session_id)
 
     winner = _pick_highest(
         _pick_highest(_pick_highest(exfil_result, supply_result), git_result),
