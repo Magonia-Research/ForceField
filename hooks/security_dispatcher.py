@@ -38,6 +38,42 @@ from credential_access_guard import format_alert as cred_access_format  # noqa: 
 from credential_access_guard import HARD_DENY_PATTERNS as CRED_ACCESS_HARD_DENY  # noqa: E402
 from allowlist import is_suppressed  # noqa: E402
 from hook_logging import log_security_event  # noqa: E402
+from config import effective_decision  # noqa: E402
+
+
+def _finish(
+    guard_name: str,
+    natural_decision: str,
+    command: str,
+    pattern_name: str,
+    reason: str,
+) -> dict[str, object] | None:
+    """Clamp a guard's natural decision by config, log it, and build the response.
+
+    ``deny``/``ask`` emit a permissionDecision; ``warn`` emits context only
+    (systemMessage); ``allow``/``off`` return None (a config downgrade waves the
+    call through). The clamp only ever loosens, so zero-false-positive-deny holds.
+    """
+    decision = effective_decision(guard_name, natural_decision)
+    extra = None if decision == natural_decision else {
+        "natural": natural_decision,
+        "config_downgraded": True,
+    }
+    log_security_event(
+        guard_name, decision,
+        pattern_matched=pattern_name, command=command, extra=extra,
+    )
+    if decision in ("deny", "ask"):
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": decision,
+                "permissionDecisionReason": reason,
+            },
+        }
+    if decision == "warn":
+        return {"systemMessage": reason}
+    return None
 
 
 def run_exfil_guard(command: str) -> dict[str, object] | None:
@@ -56,20 +92,11 @@ def run_exfil_guard(command: str) -> dict[str, object] | None:
         )
         return None
 
-    decision = "deny" if is_hard_deny else "ask"
-    log_security_event(
-        "exfil_guard", decision,
-        pattern_matched=pattern_name, command=command,
+    natural = "deny" if is_hard_deny else "ask"
+    return _finish(
+        "exfil_guard", natural, command, pattern_name,
+        exfil_format(pattern_name, matched_text),
     )
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
-            "permissionDecisionReason": exfil_format(
-                pattern_name, matched_text
-            ),
-        },
-    }
 
 
 def run_supply_chain_guard(command: str) -> dict[str, object] | None:
@@ -85,19 +112,10 @@ def run_supply_chain_guard(command: str) -> dict[str, object] | None:
                 extra={"suppressed": True},
             )
             return None
-        log_security_event(
-            "supply_chain_guard", "ask",
-            pattern_matched=pattern_key, command=command,
+        return _finish(
+            "supply_chain_guard", "ask", command, pattern_key,
+            format_typosquat_alert(typo, correct, installer),
         )
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "ask",
-                "permissionDecisionReason": format_typosquat_alert(
-                    typo, correct, installer
-                ),
-            },
-        }
 
     danger_result = check_dangerous(command)
     if danger_result:
@@ -118,20 +136,11 @@ def run_supply_chain_guard(command: str) -> dict[str, object] | None:
                 extra={"suppressed": True},
             )
             return None
-        decision = "deny" if is_hard_deny else "ask"
-        log_security_event(
-            "supply_chain_guard", decision,
-            pattern_matched=pattern_name, command=command,
+        natural = "deny" if is_hard_deny else "ask"
+        return _finish(
+            "supply_chain_guard", natural, command, pattern_name,
+            format_danger_alert(pattern_name, matched_text),
         )
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": decision,
-                "permissionDecisionReason": format_danger_alert(
-                    pattern_name, matched_text
-                ),
-            },
-        }
 
     return None
 
@@ -152,18 +161,11 @@ def run_git_guard(command: str) -> dict[str, object] | None:
         )
         return None
 
-    decision = "deny" if is_hard_deny else "ask"
-    log_security_event(
-        "git_guard", decision,
-        pattern_matched=pattern_name, command=command,
+    natural = "deny" if is_hard_deny else "ask"
+    return _finish(
+        "git_guard", natural, command, pattern_name,
+        git_format(pattern_name, matched_text),
     )
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
-            "permissionDecisionReason": git_format(pattern_name, matched_text),
-        },
-    }
 
 
 def run_credential_access_guard(command: str) -> dict[str, object] | None:
@@ -182,20 +184,11 @@ def run_credential_access_guard(command: str) -> dict[str, object] | None:
         )
         return None
 
-    decision = "deny" if is_hard_deny else "ask"
-    log_security_event(
-        "credential_access_guard", decision,
-        pattern_matched=pattern_name, command=command,
+    natural = "deny" if is_hard_deny else "ask"
+    return _finish(
+        "credential_access_guard", natural, command, pattern_name,
+        cred_access_format(pattern_name, matched_text),
     )
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
-            "permissionDecisionReason": cred_access_format(
-                pattern_name, matched_text
-            ),
-        },
-    }
 
 
 def _pick_highest(
