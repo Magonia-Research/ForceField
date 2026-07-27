@@ -202,18 +202,28 @@ def _write_state(path: Path, data: dict) -> None:
         pass
 
 
-def build_constraint_response(prompt: str) -> dict:
+def build_constraint_response(tool_input: dict) -> dict:
+    # updatedInput REPLACES the tool input wholesale and is validated against the
+    # Agent tool schema, so it must carry every field the caller sent. Returning
+    # only {"prompt": ...} drops required siblings such as description and
+    # subagent_type, and the spawn fails schema validation instead of proceeding.
+    if not isinstance(tool_input, dict):
+        return {}
+    prompt = tool_input.get("prompt", "")
+    if not isinstance(prompt, str):
+        return {}
     # Idempotency: skip re-injection only when our EXACT constraints block is
     # already prepended (a genuine prior injection). Matching on the header prefix
     # alone let an attacker suppress injection by opening their prompt with the
     # literal header text, so require the full block.
     if prompt.startswith(SECURITY_CONSTRAINTS):
         return {}
-    modified_prompt = SECURITY_CONSTRAINTS + prompt
+    updated_input = dict(tool_input)
+    updated_input["prompt"] = SECURITY_CONSTRAINTS + prompt
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
-            "updatedInput": {"prompt": modified_prompt},
+            "updatedInput": updated_input,
         },
     }
 
@@ -453,8 +463,7 @@ def main() -> None:
         raw = sys.stdin.read(MAX_STDIN_BYTES)
         data = json.loads(raw)
         tool_input = data.get("tool_input", {})
-        prompt = tool_input.get("prompt", "")
-        safe_response = build_constraint_response(prompt)
+        safe_response = build_constraint_response(tool_input)
     except Exception:
         json.dump({}, sys.stdout)
         return
