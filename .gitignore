@@ -216,3 +216,23 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Portcullis plugin ---
+__pycache__/
+*.pyc
+.venv/
+hooks/sigma_rules.json
+hooks/security.log
+
+# Local research + auto-injected files — never ship to the public repo
+/CLAUDE.md
+intel/
+*.fts-bak
+
+# Scratch / intermediate work — never ship
+.claude-tmp/
+.ua/
+
+# OpenCode port — dependencies are installed, not vendored
+.opencode/node_modules/
+.opencode/plugins/portcullis/node_modules/
