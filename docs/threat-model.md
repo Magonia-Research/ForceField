@@ -45,6 +45,7 @@ clone it.
 | **17 git config keys whose values a later routine command executes** (`core.hooksPath`, `core.sshCommand`, `core.pager`, `credential.helper`, `diff.external`, and the rest) | 4 patterns covering the config, `-c`, environment-variable and template-directory spellings | `ask`, on every host, patched or not |
 | **Writes to `.git/hooks/` and to any of the four git config levels** | 2 patterns, including paths that never contain the literal `.git/…hooks/` substring | `ask` |
 | **A shell alias**, which runs the moment it is invoked | 1 pattern, matching only `alias.<name>` values starting with `!` | `ask` |
+| **Every clone that has not disarmed the above**, including the `gh repo clone` spelling | 1 pattern, redirecting to a named hardened command rather than only reporting | `ask` until the clone is hardened, then silent |
 
 | Not covered | Why |
 |---|---|
@@ -97,9 +98,9 @@ Triggered by: `git config core.hooksPath .githooks`
 }
 ```
 
-### The eleven patterns
+### The twelve patterns
 
-Eleven patterns, ten of which **ask**, one of which **denies**.
+Twelve patterns, eleven of which **ask**, one of which **denies**.
 
 | Pattern | Rung | Catches |
 |---|---|---|
@@ -114,6 +115,7 @@ Eleven patterns, ten of which **ask**, one of which **denies**.
 | `git_ext_transport_rce` | **deny** | `ext::` in a URL on `clone\|fetch\|pull\|push\|remote\|submodule\|ls-remote\|archive`. |
 | `git_hooks_dir_write` | ask | A write verb targeting `.git/hooks/`, `.git/modules/*/hooks/`, `$GIT_DIR/**/hooks/`, or a path from `git rev-parse --git-path hooks`. |
 | `git_config_file_write` | ask | A write verb targeting `.git/config`, `.git/modules/*/config`, `~/.gitconfig`, `~/.config/git/config`, or `/etc/gitconfig`. Any of the four config levels can set `core.hooksPath`. |
+| `unhardened_clone` | ask | Any `git clone` — or `gh repo clone` — that has not set an inert `core.hooksPath` *and* passed `--no-recurse-submodules`. Checked last, so a clone that also recurses, sets an RCE key or names an `ext::` URL keeps its more specific finding. See [the redirect](#the-clone-redirect). |
 
 **`ext::` earns the hard deny** because the transport hands its URL to the shell:
 `git clone "ext::sh -c payload"` runs `payload`, and git ships it disabled by default for exactly
@@ -141,6 +143,73 @@ Triggered by: `git clone ext::sh -c 'id' /tmp/x`
 **`--recurse-submodules` is deliberately not hard-denied.** It is the CVE trigger surface and
 also how thousands of ordinary repositories are cloned.
 
+### The clone redirect
+
+The ten patterns above catch a clone that is *visibly* dangerous. `unhardened_clone` covers the
+rest, which is nearly all of them: a plain `git clone <url>` matched nothing at all, and it is
+still the command that fetches attacker-controlled content and lets git decide what to execute
+while doing it.
+
+It is a redirect, not a wall. The finding names one command, and running that command makes it
+go away:
+
+```bash
+git -c core.hooksPath=/dev/null clone --no-recurse-submodules <url>
+```
+
+Neither half is decoration.
+
+**`core.hooksPath=/dev/null`** points git's hook lookup at a path that cannot contain a hook.
+Measured on git 2.50.1: a `post-commit` hook that fires normally does not fire under it,
+`git rev-parse --git-path hooks` reports `/dev/null`, and the setting reaches git's own
+subprocesses through `GIT_CONFIG_PARAMETERS` — so a submodule checkout spawned by the clone
+inherits it. `git clone --config core.hooksPath=/dev/null` counts too, since git applies
+`--config` before anything is fetched or checked out; it differs only in persisting into the
+new repository.
+
+**`--no-recurse-submodules`** is not redundant with clone's default. `clone.recurseSubmodules`
+or `submodule.recurse`, set at any of the four config levels, makes a bare `git clone` recursive
+with nothing on the command line to show it. That is the composition attack from
+[the variant that needs no CVE](#the-variant-that-needs-no-cve), one step earlier: the step that
+sets the key and the step that clones are each individually unremarkable. The explicit flag
+overrides all four levels.
+
+Because neither of those is a bug that a git release closed, this finding does **not** downgrade
+on a patched host — and on a clone it stands in place of the CVE downgrade. Without that,
+`git clone --recursive <url>`, which cannot be hardened by construction, would go quiet on a
+patched host while the strictly safer `git clone <url>` still prompted, and a README that asked
+for `--recursive` would buy *less* friction than one that did not.
+
+Triggered by: `git clone https://github.com/example/repo.git`
+
+```json
+{
+  "Attributes": {
+    "command.line": "git clone https://github.com/example/repo.git",
+    "forcefield.decision": "ask",
+    "forcefield.guard": "git_guard",
+    "forcefield.natural": "ask",
+    "forcefield.pattern": "unhardened_clone"
+  },
+  "Body": "git_guard: ask (unhardened_clone)",
+  "EventName": "forcefield.git_guard",
+  "SeverityNumber": 14,
+  "SeverityText": "WARN"
+}
+```
+
+**A clone named is not a clone run.** This is the one git pattern that sees every clone rather
+than a flagged minority, so it is anchored twice over: `clone` must sit in git's subcommand
+position, and the shell segment carrying it must be led by `git` or `gh`. `grep 'git clone'`,
+`echo 'run git clone later' >> NOTES.md` and a heredoc commit message about cloning all carry the
+literal and run nothing. Hardening is judged per segment as well, so
+`<hardened clone> && git clone <other>` cannot launder the second clone with the first one's
+flags.
+
+**What it does not cover.** A clone reached through a wrapper that hides the command word —
+`xargs git clone`, `timeout 60 git clone`, a loop body — is not matched. That is a miss rather
+than a weakened decision, and it is the same limit every position-anchored pattern here has.
+
 **Reading a config key is not setting one.** `git config --get`, `--get-all`, `--get-regexp`,
 `--list`, `--unset` and friends are exempt: auditing your own config for exactly these keys is
 the natural first move. The exemption is revoked if an inline setter appears anywhere in the
@@ -166,29 +235,37 @@ Evidence is consulted **escalate-first**, so a downgrade can never override a po
 Any probe that cannot reach an answer returns no verdict rather than a guess, and the guard keeps
 the decision it would have made: a failed probe costs a prompt, never a block.
 
-On a patched host, a recursive clone stops prompting and becomes a context note naming the
+On a patched host, initializing submodules stops prompting and becomes a context note naming the
 version that closed the CVE:
 
-Triggered by: `git clone --recursive https://github.com/example/repo.git`
+Triggered by: `git submodule update --init --recursive`
 
 ```json
 {
   "Attributes": {
-    "command.line": "git clone --recursive https://github.com/example/repo.git",
+    "command.line": "git submodule update --init --recursive",
     "forcefield.decision": "warn",
     "forcefield.guard": "git_guard",
-    "forcefield.natural": "ask",
-    "forcefield.pattern": "recursive_submodule_clone"
+    "forcefield.natural": "warn",
+    "forcefield.pattern": "submodule_update"
   },
-  "Body": "git_guard: warn (recursive_submodule_clone)",
+  "Body": "git_guard: warn (submodule_update)",
   "EventName": "forcefield.git_guard",
   "SeverityNumber": 13,
   "SeverityText": "WARN"
 }
 ```
 
-`forcefield.natural` is `ask` and `forcefield.decision` is `warn`, which is the whole grading
-model visible in one record.
+`forcefield.natural` is `warn` here, not `ask`. Evidence grading happens *inside* the guard, so
+`warn` is the decision it arrived at and wanted; `forcefield.natural` records what a config clamp
+or a remembered approval would have overridden, which is a different question. Compare the record
+above, where the same field reads `ask`.
+
+**The two clone-shaped patterns no longer reach this branch.** `recursive_submodule_clone` and a
+bare clone both carry `unhardened_clone` underneath them, which the patch does not close, so on a
+patched host a clone keeps its ask and gets the hardened command instead of a downgrade. The
+downgrade still applies in full to the spellings that act inside a checkout you already have:
+`git submodule update`, and a `pull`/`fetch`/`checkout` that recurses.
 
 **A clean `.gitmodules` downgrades nothing.** Only the host's patch level moves a decision down,
 because only the patch level actually closes the CVE. Absence of a known signature is not absence

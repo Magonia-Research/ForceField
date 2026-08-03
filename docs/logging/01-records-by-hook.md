@@ -231,22 +231,46 @@ Triggered by: `git config core.hooksPath .githooks`
 
 ### `git_guard` (graded on evidence)
 
-`PreToolUse[Bash], via security_dispatcher.py`. The clone-time CVE trigger surface, graded by `git_forensics`. This capture ran on a patched host, so the `ask` was downgraded to `warn`: read `forcefield.natural` for what the guard wanted and `forcefield.decision` for what it enforced.
+`PreToolUse[Bash], via security_dispatcher.py`. The clone-time CVE trigger surface, graded by `git_forensics`. This capture ran on a patched host, so the pattern's usual `ask` was graded down to `warn` before the record was built — which is why `forcefield.natural` reads `warn` too. That field records what a config clamp or a remembered approval would have overridden, not what the pattern would have said without evidence.
 
-Triggered by: `git clone --recursive https://github.com/example/repo.git`
+Triggered by: `git submodule update --init --recursive`
 
 ```json
 {
   "Attributes": {
-    "command.line": "git clone --recursive https://github.com/example/repo.git",
+    "command.line": "git submodule update --init --recursive",
     "forcefield.decision": "warn",
     "forcefield.guard": "git_guard",
     "forcefield.natural": "warn",
-    "forcefield.pattern": "recursive_submodule_clone"
+    "forcefield.pattern": "submodule_update"
   },
-  "Body": "git_guard: warn (recursive_submodule_clone)",
+  "Body": "git_guard: warn (submodule_update)",
   "EventName": "forcefield.git_guard",
   "SeverityNumber": 13,
+  "SeverityText": "WARN"
+}
+```
+
+### `git_guard` (unhardened clone)
+
+`PreToolUse[Bash], via security_dispatcher.py`. Every clone that has not disarmed the clone-time
+execution surface, redirected to the hardened command rather than only reported. This one does
+not downgrade on a patched host: what it asks for is not a patch for either CVE.
+
+Triggered by: `git clone https://github.com/example/repo.git`
+
+```json
+{
+  "Attributes": {
+    "command.line": "git clone https://github.com/example/repo.git",
+    "forcefield.decision": "ask",
+    "forcefield.guard": "git_guard",
+    "forcefield.natural": "ask",
+    "forcefield.pattern": "unhardened_clone"
+  },
+  "Body": "git_guard: ask (unhardened_clone)",
+  "EventName": "forcefield.git_guard",
+  "SeverityNumber": 14,
   "SeverityText": "WARN"
 }
 ```

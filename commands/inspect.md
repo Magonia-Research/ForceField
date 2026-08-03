@@ -50,7 +50,17 @@ refusal has a flag that overrides it:
 - **`file://`** — a local clone is the amplifier for CVE-2024-32002, and a
   repository already on this disk can be read directly instead.
 
-If a verdict was recorded, the subsequent real clone of that same commit is quiet.
-The record is keyed by repository *and* commit, so it stops applying the moment the
-remote moves — that is deliberate, and a re-prompt after an upstream push is the
-system working. Never edit `~/.claude/forcefield/inspections.json` directly.
+A recorded `DO NOT CLONE` is what the guard consults later: the subsequent clone of
+that repository is denied outright rather than prompted on, at any commit, until you
+revoke the verdict with `forget`. A clean verdict is keyed by repository *and* commit,
+so it stops applying the moment the remote moves — that is deliberate, and a re-prompt
+after an upstream push is the system working. Never edit
+`~/.claude/forcefield/inspections.json` directly.
+
+A clean verdict does not make the clone silent. `git_guard` asks on any clone that has
+not disarmed the clone-time execution surface, whatever this command found, because
+what `.gitmodules` says and how the clone is run are two different questions. Clone with:
+
+```
+git -c core.hooksPath=/dev/null clone --no-recurse-submodules <url>
+```

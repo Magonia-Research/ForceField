@@ -310,7 +310,7 @@ for stale in sorted(documented - set(git_guard.GIT_PATTERNS)):
 
 count = len(git_guard.GIT_PATTERNS)
 denies = len(git_guard.HARD_DENY_PATTERNS)
-check("Eleven patterns" in threat_model and count == 11,
+check("Twelve patterns" in threat_model and count == 12,
       "threat-model.md's pattern count matches the guard (%d)" % count)
 check(denies == 1 and "one of which **denies**" in threat_model,
       "and its deny count matches (%d)" % denies)

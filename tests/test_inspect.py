@@ -707,7 +707,13 @@ gf.clone_cve_exposure = lambda path=None: {
     "reason": "git 2.50.1 is patched for CVE-2024-32002 and CVE-2025-48384"}
 
 HOSTILE = "https://git.internal.corp/team/hostile.git"
-CLONE = "git clone --recursive " + HOSTILE
+# Written in its hardened form on purpose. An unhardened clone now carries its
+# own `unhardened_clone` ask, which stands in place of the patched-host
+# downgrade — so with `git clone --recursive` here the control below would read
+# `ask` for a reason that has nothing to do with the store, and the `deny` that
+# follows would prove nothing about it. Hardened, a recorded verdict is the only
+# thing left that can move this decision.
+CLONE = ("git -c core.hooksPath=/dev/null clone --no-recurse-submodules " + HOSTILE)
 SIG = "submodule_path_dotgit_collision"
 
 
@@ -785,14 +791,18 @@ try:
     # This block already stubs clone_cve_exposure to a patched host, so the
     # downgrade leg is live and the veto is the only thing that can move the
     # answer back to ask.
+    #
+    # Spelled with `submodule update` rather than a clone: a clone would carry
+    # its own `unhardened_clone` ask, which stands in place of the downgrade, so
+    # both legs would read `ask` and the veto would no longer be what decides.
     ir.forget("")
     check(git_guard.assess(
-        "recursive_submodule_clone", "m",
-        "git clone --recursive https://x/y && git config --get core.pager",
+        "submodule_update", "m",
+        "git submodule update --init && git config --get core.pager",
     )[0] == "warn", "a read-only config read does not veto the downgrade")
     check(git_guard.assess(
-        "recursive_submodule_clone", "m",
-        "git clone --recursive https://x/y && git config core.pager=evil",
+        "submodule_update", "m",
+        "git submodule update --init && git config core.pager=evil",
     )[0] == "ask", "control: an actual setter does veto it")
 finally:
     ir.forget("")

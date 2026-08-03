@@ -19,7 +19,9 @@ human has reviewed it:
   the ``$GIT_DIR/hooks`` form, and paths computed by ``git rev-parse
   --git-path``) or a git config file at the repo (``.git/config``), global
   (``~/.gitconfig``), XDG (``~/.config/git/config``), or system
-  (``/etc/gitconfig``) level.
+  (``/etc/gitconfig``) level;
+- and any ``git clone`` that has not disarmed that surface, which is redirected
+  to the hardened form rather than merely reported (``HARDENED_CLONE``).
 
 Commands are normalized first (``${IFS}``, backslash escapes, intra-word quoting,
 redundant slashes) so common shell obfuscations do not evade the patterns.
@@ -72,6 +74,28 @@ _WRITE_VERB = (
     r"|\btruncate\b|\bsed\b|\bpatch\b|\bprintf\b|\bpython[0-9.]*\b|\bperl\b"
     r"|\bruby\b|\bnode\b"
 )
+
+# git's own global options: the only tokens that may sit between ``git`` and its
+# subcommand. ``unhardened_clone`` is the one git pattern that sees *every*
+# clone rather than a flagged minority, so it cannot afford the loose
+# ``\bgit\b[^\n]*\bclone\b`` shape the flagged patterns use -- that shape also
+# matches ``git log --grep clone`` and ``git commit -m 'clone fix'``, which are
+# ordinary commands in any repository. Anchoring ``clone`` to the subcommand
+# position is what keeps this quiet. Every branch is length-bounded because the
+# hook has a 5s budget and ``tests/test_redos.py`` times every compiled pattern
+# in ``hooks/``.
+_GIT_GLOBAL_OPT = (
+    r"(?:-[cC]\s*\S{1,256}"
+    r"|--(?:git-dir|work-tree|namespace|exec-path|config-env|super-prefix)[=\s]\S{1,256}"
+    r"|--(?:no-pager|paginate|bare|literal-pathspecs|glob-pathspecs"
+    r"|noglob-pathspecs|icase-pathspecs|no-replace-objects|no-optional-locks"
+    r"|no-lazy-fetch)"
+    r"|-p)"
+)
+
+# The hardened clone this guard redirects to. ``scripts/install.sh`` has cloned
+# SigmaHQ with this exact form since before the pattern existed.
+HARDENED_CLONE = "git -c core.hooksPath=/dev/null clone --no-recurse-submodules"
 
 GIT_PATTERNS: dict[str, re.Pattern[str]] = {
     # --recu[...] covers git's unambiguous prefix abbreviations of
@@ -152,6 +176,19 @@ GIT_PATTERNS: dict[str, re.Pattern[str]] = {
         r"|/etc/gitconfig\b)",
         re.IGNORECASE,
     ),
+    # Every clone that has not disarmed the clone-time execution surface. Last
+    # on purpose: `_first_match` returns the first hit, so a clone that ALSO
+    # recurses submodules, sets an RCE-capable config key or names an `ext::`
+    # URL keeps its more specific -- and in the ext:: case, denying -- finding.
+    # `gh repo clone` is the same act through the other common spelling; leaving
+    # it out would make the guard bypassable by accident rather than by intent.
+    # Exempted by `_is_hardened_clone`, which is what makes this a redirect to a
+    # named command rather than a wall.
+    "unhardened_clone": re.compile(
+        r"\bgit\b(?:\s+" + _GIT_GLOBAL_OPT + r")*\s+clone\b"
+        r"|\bgh\s+repo\s+clone\b",
+        re.IGNORECASE,
+    ),
 }
 
 # Almost every git-guard finding is "ask". Those patterns have rare but real
@@ -224,6 +261,102 @@ def _is_read_only_config(normalized: str) -> bool:
     )
 
 
+# ``core.hooksPath`` is on the RCE list because pointing it at repository content
+# runs that content. Pointing it at ``/dev/null`` does the exact opposite: it is
+# how you turn hooks OFF, and it is half of what ``_is_hardened_clone`` requires.
+# Measured on git 2.50.1: a ``post-commit`` hook that fires normally does not
+# fire under it, ``rev-parse --git-path hooks`` reports ``/dev/null``, and the
+# setting reaches git's own subprocesses through ``GIT_CONFIG_PARAMETERS`` — so
+# a submodule checkout spawned by the clone inherits it too.
+#
+# Both spellings count. ``-c`` is scoped to the one invocation and is what
+# ``HARDENED_CLONE`` uses; ``git clone --config`` writes the key into the new
+# repository, which git applies "before the remote history is fetched or any
+# files checked out" — in force for the window that matters, at the cost of
+# persisting into the clone.
+_INERT_HOOKS_PATH = re.compile(
+    r"(?:^|\s)(?:-c\s*|--config[=\s]\s*)core\.hooksPath\s*=\s*"
+    r"['\"]?/dev/null['\"]?(?=$|[\s;&|])",
+    re.IGNORECASE,
+)
+
+# ``--no-recurse-submodules`` is NOT redundant with clone's default.
+# ``clone.recurseSubmodules`` or ``submodule.recurse`` set at any of the four
+# config levels makes a bare ``git clone`` recursive with nothing on the command
+# line to show it — the composition attack in `docs/threat-model.md`, where the
+# config-setting step and the clone step are each individually benign. The
+# explicit flag overrides all four. ``--no-recu`` and the rest of git's
+# unambiguous abbreviations are accepted, mirroring how the positive form is
+# matched above.
+_NO_RECURSE_SUBMODULES = re.compile(r"--no-recu[\w-]*", re.IGNORECASE)
+
+
+def _is_hardened_clone(normalized: str) -> bool:
+    """Whether this clone has disarmed the clone-time execution surface."""
+    return bool(
+        _INERT_HOOKS_PATH.search(normalized)
+        and _NO_RECURSE_SUBMODULES.search(normalized)
+    )
+
+
+# The two command words that reach a clone. Anything else leading the segment
+# means the literal is being named rather than run.
+_CLONE_LEADERS = frozenset({"git", "gh"})
+
+
+def _unhardened_clone_segment(normalized: str) -> str | None:
+    """Text of the first segment here that actually INVOKES an unhardened clone.
+
+    Two refinements the pattern alone cannot make. Both matter more for this
+    pattern than for any other in the file, because this is the one that sees
+    every clone instead of a flagged minority.
+
+    *Position.* ``grep 'git clone'``, ``echo 'run git clone later' >> NOTES.md``
+    and a heredoc commit message about cloning all carry the literal and run
+    nothing — the shapes ``tests/test_false_positives.py`` exists to hold the
+    line on. ``shell_context`` supplies the quote-aware split; the segment has to
+    be led by ``git`` or ``gh`` for the match to mean what the pattern assumed.
+
+    *Scope.* Hardening is judged per segment, not per command, so
+    ``<hardened clone> && git clone <other>`` cannot launder the second clone
+    with the first one's flags.
+
+    Fails toward the ask. ``shell_context`` degrades toward the caller's prior
+    behaviour by design, and the prior behaviour of this pattern is to match.
+    """
+    try:
+        from shell_context import leading_command, split_segments, strip_heredocs
+
+        segments = [segment
+                    for segment in split_segments(strip_heredocs(normalized))
+                    if leading_command(segment) in _CLONE_LEADERS]
+    except Exception:  # noqa: BLE001 - never toward silence
+        segments = [normalized]
+    for segment in segments:
+        match = GIT_PATTERNS["unhardened_clone"].search(segment)
+        if match and not _is_hardened_clone(segment):
+            return match.group(0)
+    return None
+
+
+def _only_hooks_disabled(normalized: str) -> bool:
+    """Whether every RCE-capable config setting here merely turns hooks off.
+
+    Without this carve-out the guard would prompt on the exact command it tells
+    you to run instead, which is the one failure that would make the redirect
+    worse than no redirect at all.
+
+    Scoped to the *setting*, never to the command: the inert settings are removed
+    and the RCE pattern re-run over what is left, so
+    ``-c core.hooksPath=/dev/null -c core.pager=evil`` keeps its finding.
+    """
+    if not _INERT_HOOKS_PATH.search(normalized):
+        return False
+    return not GIT_PATTERNS["git_config_rce_primitive"].search(
+        _INERT_HOOKS_PATH.sub(" ", normalized)
+    )
+
+
 def _first_match(command, skip=frozenset()):
     """First pattern in ``GIT_PATTERNS`` that matches, ignoring ``skip``.
 
@@ -247,8 +380,15 @@ def _first_match(command, skip=frozenset()):
             continue
         match = pattern.search(normalized)
         if match:
-            if name == "git_config_rce_primitive" and _is_read_only_config(normalized):
+            if name == "git_config_rce_primitive" and (
+                _is_read_only_config(normalized) or _only_hooks_disabled(normalized)
+            ):
                 continue
+            if name == "unhardened_clone":
+                segment = _unhardened_clone_segment(normalized)
+                if segment is None:
+                    continue
+                return (name, segment)
             return (name, match.group(0))
     return None
 
@@ -312,6 +452,13 @@ PATTERN_RISKS = {
         "XDG ~/.config/git/config, or /etc/gitconfig) can set core.hooksPath or "
         "another key that runs code on the next git operation."
     ),
+    "unhardened_clone": (
+        "git clone is not a read-only operation. This clone leaves git free to "
+        "run a hook out of the repository it is fetching, and leaves "
+        "clone.recurseSubmodules — settable in any of the four config levels — "
+        "free to pull in submodule content that was never named on this command "
+        "line. Both happen before you or the agent have read a line of the code."
+    ),
 }
 
 PATTERN_ALTERNATIVES = {
@@ -360,6 +507,16 @@ PATTERN_ALTERNATIVES = {
     "git_config_file_write": (
         "Do not edit .git/config for a repo you have not audited; review exactly "
         "which key is being set and what it points to."
+    ),
+    # Describes the hardening rather than repeating the command, which
+    # `_clone_reason` appends with the real URL spliced in. It still has to
+    # stand alone: `assess` falls back to `format_alert` when git_forensics
+    # cannot be imported, and that path never reaches `_clone_reason`.
+    "unhardened_clone": (
+        "Point core.hooksPath at /dev/null for the clone and pass "
+        "--no-recurse-submodules, so no hook the repository ships can run and "
+        "no config level can recurse submodules behind you. Inspect the remote "
+        "first with /forcefield:inspect."
     ),
 }
 
@@ -418,6 +575,22 @@ _CVE_DEPENDENT = frozenset({
     "submodule_update",
 })
 
+# Patterns graded against evidence about the REMOTE rather than about this host:
+# both name a fresh clone of a URL, so a recorded /forcefield:inspect verdict and
+# the remote's own .gitmodules are evidence about the thing being fetched.
+# `unhardened_clone` is here for the escalations and deliberately NOT in
+# `_CVE_DEPENDENT`, because no git release makes an unhardened clone hardened.
+_CLONE_PATTERNS = _CVE_DEPENDENT | frozenset({"unhardened_clone"})
+
+# What the downgrade veto ignores. `_first_non_cve_pattern` exists to catch a
+# command that ALSO sets a primitive no git release makes safe, so it must not
+# see `unhardened_clone`: that is not a primitive the command sets, it is the
+# absence of hardening on the very clone being graded, and it matches every
+# recursive clone by construction. Leaving it in would silently retire the
+# patched-host downgrade instead of qualifying it — which `assess` does properly,
+# by letting the unhardened-clone ask stand in place of the downgraded warn.
+_VETO_SKIP = _CVE_DEPENDENT | frozenset({"unhardened_clone"})
+
 # Opt out of the pre-clone remote fetch without disabling the guard.
 _REMOTE_INSPECT_ENV = "FORCEFIELD_NO_REMOTE_INSPECT"
 
@@ -435,7 +608,37 @@ def _first_non_cve_pattern(command):
     pattern *and* set an RCE-capable config key, and only the former is made
     irrelevant by a patched git.
     """
-    return _first_match(command, skip=_CVE_DEPENDENT)
+    return _first_match(command, skip=_VETO_SKIP)
+
+
+def _unhardened_clone_match(command):
+    """``("unhardened_clone", matched_text)`` for this command, or None.
+
+    The one pattern `assess` has to be able to test out of order. `check_git`
+    reports its first match and `unhardened_clone` is checked last, so a clone
+    that also recurses submodules arrives here labelled
+    `recursive_submodule_clone` — and on a patched host that label downgrades
+    while the hardening finding underneath it does not.
+    """
+    segment = _unhardened_clone_segment(_normalize(command))
+    return ("unhardened_clone", segment) if segment is not None else None
+
+
+def _clone_reason(matched_text: str, command: str) -> str:
+    """The unhardened-clone ask, carrying the command to run in its place.
+
+    A prompt that says "this is not hardened" and stops there is a toll booth.
+    The URL is spliced into both lines so the replacement is copy-pasteable;
+    `hook_logging._scrub_reason` masks a credential embedded in it, on this path
+    like every other.
+    """
+    url_match = _CLONE_URL.search(command)
+    url = url_match.group(1)[:200] if url_match else "<url>"
+    reason = format_alert("unhardened_clone", matched_text)
+    reason += "\n\nRun instead:\n"
+    reason += "  /forcefield:inspect %s\n" % url
+    reason += "  %s %s\n" % (HARDENED_CLONE, url)
+    return reason
 
 
 def _deny_signatures(indicators):
@@ -519,20 +722,29 @@ def assess(pattern_name, matched_text, command, cwd=None):
     if pattern_name in HARD_DENY_PATTERNS:
         return ("deny", format_alert(pattern_name, matched_text))
 
-    if pattern_name not in _CVE_DEPENDENT:
+    if pattern_name not in _CLONE_PATTERNS:
         return ("ask", format_alert(pattern_name, matched_text))
 
     # --- escalate: a signature already on disk -----------------------------
-    try:
-        root = forensics.find_repo_root(cwd or os.getcwd())
-        if root:
-            signatures = _deny_signatures(forensics.audit_repo(root)["indicators"])
-            if signatures:
-                return ("deny", _indicator_reason(
-                    pattern_name, signatures,
-                    os.path.join(root, ".gitmodules")))
-    except Exception:  # noqa: BLE001
-        pass
+    #
+    # Scoped to the CVE patterns. `git submodule update` acts on the repository
+    # the shell is standing in, so that repository's .gitmodules is evidence
+    # about it. A clone of some other URL is not made dangerous by the
+    # .gitmodules of whatever directory it happens to be launched from, and
+    # `unhardened_clone` matches enough commands that inheriting that mismatch
+    # would turn one hostile checkout on disk into a block on every unrelated
+    # clone made while standing in it.
+    if pattern_name in _CVE_DEPENDENT:
+        try:
+            root = forensics.find_repo_root(cwd or os.getcwd())
+            if root:
+                signatures = _deny_signatures(forensics.audit_repo(root)["indicators"])
+                if signatures:
+                    return ("deny", _indicator_reason(
+                        pattern_name, signatures,
+                        os.path.join(root, ".gitmodules")))
+        except Exception:  # noqa: BLE001
+            pass
 
     url_match = _CLONE_URL.search(command)
     clone_url = url_match.group(1) if url_match else None
@@ -557,6 +769,20 @@ def assess(pattern_name, matched_text, command, cwd=None):
         except Exception:  # noqa: BLE001
             pass
 
+    # `unhardened_clone` stops here. Every escalation above has been consulted;
+    # what follows is the version-based downgrade, and there is no git release
+    # that makes an unhardened clone hardened. The two settings this asks for
+    # are not patches for the two CVEs — one stops a hook the repository ships
+    # from running at all, the other overrides a `clone.recurseSubmodules` no
+    # git version has ever ignored.
+    if pattern_name == "unhardened_clone":
+        reason = _clone_reason(matched_text, command)
+        if remote_clean:
+            reason += ("\nThe remote's .gitmodules was fetched without cloning and "
+                       "carries no known exploit signature, which says nothing "
+                       "about the code or about the hooks this clone would run.")
+        return ("ask", reason)
+
     # --- downgrade: nothing measurable is exposed --------------------------
     try:
         exposure = forensics.clone_cve_exposure(cwd)
@@ -579,6 +805,21 @@ def assess(pattern_name, matched_text, command, cwd=None):
         return ("ask", reason)
 
     if exposure.get("exposed") is False:
+        # The CVE half of this finding is closed here; the hardening half is
+        # not, and a clone is the one shape where both apply to the same
+        # command. Without this, `git clone --recursive <url>` — which cannot
+        # be hardened, by construction — would go quiet on a patched host while
+        # the strictly safer `git clone <url>` still prompted, so a README that
+        # asked for `--recursive` would buy LESS friction than one that did not.
+        clone = _unhardened_clone_match(command)
+        if clone is not None:
+            reason = _clone_reason(clone[1], command)
+            reason += ("\n\n%s downgraded to context on this host: %s. That "
+                       "closes the two CVEs and nothing else — it does not stop "
+                       "a hook this repository ships, and it does not override a "
+                       "clone.recurseSubmodules set in any config level."
+                       % (pattern_name, exposure["reason"]))
+            return ("ask", reason)
         note = f"GIT GUARD: {pattern_name} (context only)\n\n"
         note += f"Matched: {matched_text[:120]}\n"
         note += f"{exposure['reason']}, so the clone-time RCE path is closed here.\n"

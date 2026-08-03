@@ -14,8 +14,14 @@ is in code, not model discretion.
 ## Install
 
 ```bash
-git clone https://github.com/Magonia-Research/ForceField.git
+git -c core.hooksPath=/dev/null clone --no-recurse-submodules \
+    https://github.com/Magonia-Research/ForceField.git
 ```
+
+That is longer than `git clone` on purpose, and it is the same command ForceField will ask you
+for the next time you clone anything: hooks cannot run out of the repository being fetched, and
+no config level can recurse submodules behind you. See
+[the clone redirect](docs/threat-model.md#the-clone-redirect).
 
 The repo ships `.claude-plugin/marketplace.json`, so add the checkout as a marketplace rather
 than as a plugin directory:
@@ -59,6 +65,7 @@ instead of a question. Read the log either way. The four presets are `balanced`,
 | Class | Examples | Rung |
 |---|---|---|
 | [Clone-time repo takeover](docs/threat-model.md#repository-takeover-at-clone-time) | CVE-2024-32002 and CVE-2025-48384 submodule surface, 17 RCE-capable git config keys, `.git/hooks` writes | ask, graded on evidence |
+| | Any `git clone` that has not disarmed that surface | ask, with the hardened command |
 | | `git clone ext::`, which hands its URL to a shell | **deny** |
 | [Data exfiltration](docs/threat-model.md#data-exfiltration) | Relay and tunneling domains, netcat, `/dev/tcp` reverse shells | **deny** |
 | | Data POSTs, DNS-label encoding, cloud metadata SSRF, `scp`/`rsync` | ask |
@@ -81,23 +88,41 @@ actual exploit signature. See [how a finding is graded](docs/threat-model.md#how
 
 **`/forcefield:inspect <url>` reads a repository before you clone it**, covering the self-hosted
 and SSH remotes the in-hook fetch will not touch. It uses `--no-checkout`, because both CVEs fire
-during checkout. A recorded verdict feeds back into the grading above.
+during checkout. A recorded `DO NOT CLONE` then denies the clone itself rather than prompting on it.
+
+**Every other clone is redirected, not judged.** A plain `git clone` prompts, and the reason
+carries the command that would not have — the one in [Install](#install), with your URL spliced
+in. Run that and there is no prompt. It does not stop on a patched git, because disabling hooks
+and refusing submodule recursion are not patches for either CVE.
 
 ## Check what a hook decides
 
 Feed any hook event JSON on stdin. Empty stdout means allow.
 
 ```bash
-echo '{"tool_name":"Bash","tool_input":{"command":"git clone --recursive https://github.com/example/repo.git"},"hook_event_name":"PreToolUse"}' \
+echo '{"tool_name":"Bash","tool_input":{"command":"git submodule update --init --recursive"},"hook_event_name":"PreToolUse"}' \
   | python3 hooks/security_dispatcher.py
 ```
 
-On a patched host that clone does not prompt at all. There is no `permissionDecision`, only
-context, because the prompt would have cited a bug that cannot fire there:
+On a patched host that does not prompt at all. There is no `permissionDecision`, only context,
+because the prompt would have cited a bug that cannot fire there:
 
 ```json
 {"hookSpecificOutput": {"hookEventName": "PreToolUse",
- "additionalContext": "ForceField security finding (advisory - the call was not blocked): GIT GUARD: recursive_submodule_clone (context only)\n\nMatched: git clone --recursive\ngit 2.50.1 is patched for CVE-2024-32002 and CVE-2025-48384, so the clone-time RCE path is closed here.\n\nStill treat the repository's contents as untrusted: a clean .gitmodules says nothing about what the code does once you run it."}}
+ "additionalContext": "ForceField security finding (advisory - the call was not blocked): GIT GUARD: submodule_update (context only)\n\nMatched: git submodule update --init\ngit 2.50.1 is patched for CVE-2024-32002 and CVE-2025-48384, so the clone-time RCE path is closed here.\n\nStill treat the repository's contents as untrusted: a clean .gitmodules says nothing about what the code does once you run it."}}
+```
+
+A clone is the one shape where a patched git is not the whole answer, so it prompts on any host —
+and says what to run instead:
+
+```bash
+echo '{"tool_name":"Bash","tool_input":{"command":"git clone https://github.com/example/repo.git"},"hook_event_name":"PreToolUse"}' \
+  | python3 hooks/security_dispatcher.py | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["permissionDecisionReason"].rsplit("Run instead:",1)[-1])'
+```
+
+```
+  /forcefield:inspect https://github.com/example/repo.git
+  git -c core.hooksPath=/dev/null clone --no-recurse-submodules https://github.com/example/repo.git
 ```
 
 ## Read the log

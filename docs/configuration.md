@@ -255,17 +255,23 @@ one project (home config only).
 | Fake keys in fixtures / `.env.example` | credential_guard | ask | Placeholders are already skipped; else `suppress_paths` |
 | Editing `~/.zshrc` / `~/.gitconfig` | filesystem_guard | ask | Allowlist the path, or disable for that project |
 | Shell write to `~/.claude/forcefield.json`, `settings.json`, anything under `~/.claude/forcefield/` | filesystem_guard | ask | Intentional: these decide what the guards do next, and cannot be suppressed or remembered |
-| Recursive submodule clone in a trusted repo | git_guard | ask *(context only on a patched git)* | Update git first, which closes both CVEs and the prompt stops on its own. Otherwise allowlist `recursive_submodule_clone` for that repo |
-| `git clone ext::…` | git_guard | **deny** | Not loosenable except by preset. The transport runs its URL as a shell command; see [the threat model](threat-model.md#the-eleven-patterns) |
+| Any `git clone` or `gh repo clone` | git_guard | ask | Clone with `git -c core.hooksPath=/dev/null clone --no-recurse-submodules <url>`, which the guard passes silently — the prompt names that command. It does not stop on a patched git, because neither setting is a patch for either CVE. Otherwise allowlist `unhardened_clone` for that repo. See [the clone redirect](threat-model.md#the-clone-redirect) |
+| Submodule init or a recursing pull in a trusted repo | git_guard | ask *(context only on a patched git)* | Update git first, which closes both CVEs and the prompt stops on its own. Otherwise allowlist `submodule_update` / `submodule_recurse_fetch` for that repo |
+| `git clone ext::…` | git_guard | **deny** | Not loosenable except by preset. The transport runs its URL as a shell command; see [the threat model](threat-model.md#the-twelve-patterns) |
 | Many subagent spawns hitting the rate limit | agent_guard | **deny** | `permissive`; the 10/20 limit is not otherwise tunable |
 | MCP call carrying base64 or a long token | mcp_guard | ask | Allowlist the pattern for that server |
 | WebFetch URL with an encoded query blob | webfetch_guard | ask | Allowlist it, or `webfetch_guard: warn` in home config; exfil domains stay denied |
 
-> **Before allowlisting `recursive_submodule_clone`,** read
+> **Before allowlisting `recursive_submodule_clone` or `submodule_update`,** read
 > [repository takeover at clone time](threat-model.md#repository-takeover-at-clone-time). "A repo I
 > trust" is the assumption both CVE-2024-32002 and CVE-2025-48384 are designed to defeat. Patching
 > git is the fix, and the guard notices, so the prompt disappears on its own once the host is patched.
 > An allowlist only removes the prompt, and it removes it on unpatched hosts too, where the prompt
 > was the last thing standing.
+>
+> **`unhardened_clone` is the one to reach for last**, because it is the one with a free exit.
+> Every other entry in this table trades a prompt for accepted risk; this one is answered by
+> typing a longer command, and the prompt tells you which. Allowlisting it turns every clone in
+> that project silent again, including the clones you did not type.
 
 If ForceField is broadly too loud, set a `preset` once rather than disabling guards one at a time.
