@@ -1,6 +1,6 @@
 # Architecture
 
-Two defense layers. Hooks enforce hard boundaries at execution time; the `/forcefield:harden` skill
+Two defense layers. Hooks enforce hard boundaries at execution time; the `/forcefield:full-power-to-shields` skill
 injects behavioral rules into a project's `CLAUDE.md` for what hooks physically cannot check. Both
 exist because hooks are [fail-open](hooks.md#fail-open).
 
@@ -127,7 +127,7 @@ hooks/memo.py                        Remembered approvals (ask -> allow) + CLI
 .claude-plugin/marketplace.json      Marketplace manifest
 commands/remember.md                 /forcefield:remember command
 commands/inspect.md                  /forcefield:inspect command
-skills/harden/SKILL.md               /forcefield:harden skill
+skills/full-power-to-shields/SKILL.md /forcefield:full-power-to-shields skill
 scripts/install.sh                   Setup (venv + sigma compilation)
 scripts/posture.sh                   Pick a preset / log level / free-text policy
 scripts/rotation-config.sh           Hand the file sink to the OS log rotator

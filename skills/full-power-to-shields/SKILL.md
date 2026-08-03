@@ -1,13 +1,13 @@
 ---
-name: harden
+name: full-power-to-shields
 description: >
-  Use this skill when the user runs /forcefield:harden, asks to "harden this
+  Use this skill when the user runs /forcefield:full-power-to-shields, asks to "harden this
   project", "add security rules to CLAUDE.md", or wants behavioral security
   rules that hooks cannot enforce (secret handling, prompt injection defense,
   data minimization, credential placeholders, multi-step attack awareness).
 ---
 
-# Harden — Behavioral Security Rules for CLAUDE.md
+# Full Power to Shields — Behavioral Security Rules for CLAUDE.md
 
 Injects security behavioral rules into the project's CLAUDE.md — rules that hooks physically cannot enforce (Claude's decision-making in responses, external data handling, code generation).
 
@@ -27,9 +27,9 @@ Injects security behavioral rules into the project's CLAUDE.md — rules that ho
 Everything this skill writes goes between two markers:
 
 ```
-<!-- forcefield:harden:begin v1 -->
+<!-- forcefield:full-power-to-shields:begin v1 -->
 ...rules...
-<!-- forcefield:harden:end -->
+<!-- forcefield:full-power-to-shields:end -->
 ```
 
 They are what makes the block updatable and removable. Without them there is no way to tell an injected rule from one the user wrote, so the block could only ever be appended to — and re-running the skill silently duplicated it or silently restored a rule the user had deliberately deleted.
@@ -44,8 +44,8 @@ Read the project CLAUDE.md and the global `~/.claude/CLAUDE.md`, and look for th
 
 ```bash
 ls -la ./CLAUDE.md 2>/dev/null
-grep -c "forcefield:harden:begin" ./CLAUDE.md 2>/dev/null
-grep -c "forcefield:harden:begin" ~/.claude/CLAUDE.md 2>/dev/null
+grep -c "forcefield:full-power-to-shields:begin" ./CLAUDE.md 2>/dev/null
+grep -c "forcefield:full-power-to-shields:begin" ~/.claude/CLAUDE.md 2>/dev/null
 ```
 
 Match on the markers, not on a heading. Idempotency used to rest on `grep -c "Security.*Runtime"`, a text heuristic over prose: renaming the heading double-injected, and a single line *mentioning* the section counted as the section being present — so partial coverage read as full coverage and Phase 2 added nothing.
@@ -84,7 +84,7 @@ Use the Edit tool (or Write if creating new), writing between the markers.
 Add this content, adjusted for what's already covered by the user's global CLAUDE.md (`~/.claude/CLAUDE.md`) — skip any subsection already present globally. Adjust heading level to match existing doc structure. Keep the markers on their own lines, exactly as written.
 
 ```markdown
-<!-- forcefield:harden:begin v1 -->
+<!-- forcefield:full-power-to-shields:begin v1 -->
 ## Security — Runtime Behavior
 
 Rules for Claude's decision-making that hooks cannot enforce.
@@ -124,7 +124,7 @@ Rules for Claude's decision-making that hooks cannot enforce.
 - Install dependencies for untrusted code with lifecycle scripts disabled (`npm install --ignore-scripts`) or inside a container. A `preinstall` / `postinstall` script runs arbitrary code at install time across the whole dependency tree.
 - Never execute a binary by bare name from a repo you just cloned (`git`, `node`, `./build`). A same-named executable dropped in the repo root can hijack a naive child-process spawn; use an absolute path or a trusted PATH.
 - Do not open an untrusted repo in an IDE or agent that auto-runs tasks. Rely on the editor's Workspace Trust / Restricted Mode; agent execution is gated the same way.
-<!-- forcefield:harden:end -->
+<!-- forcefield:full-power-to-shields:end -->
 ```
 
 ### Phase 5: Confirm

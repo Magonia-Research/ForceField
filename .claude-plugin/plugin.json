@@ -1,6 +1,6 @@
 {
   "name": "forcefield",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "description": "Deterministic security hardening for Claude Code. Lifecycle hooks enforce container-first execution, SigmaHQ rule matching, credential-leak blocking, exfiltration and supply-chain detection, MCP data guarding, prompt-injection defense, and least-privilege subagent spawning across the full tool-use surface.",
   "author": {
     "name": "Magonia Research"

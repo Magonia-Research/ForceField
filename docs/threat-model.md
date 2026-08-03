@@ -827,7 +827,7 @@ The 2025 edition renumbered several categories, and the IDs below are the curren
 
 | ID | Risk | ForceField defense |
 |---|---|---|
-| [LLM01](https://genai.owasp.org/llmrisk/llm01-prompt-injection/) | Prompt Injection | `injection_defense`, `agent_guard` patterns, `session_baseline` re-injection, `/forcefield:harden` CLAUDE.md rules |
+| [LLM01](https://genai.owasp.org/llmrisk/llm01-prompt-injection/) | Prompt Injection | `injection_defense`, `agent_guard` patterns, `session_baseline` re-injection, `/forcefield:full-power-to-shields` CLAUDE.md rules |
 | [LLM02](https://genai.owasp.org/llmrisk/llm022025-sensitive-information-disclosure/) | Sensitive Information Disclosure | `credential_guard`, `output_credential_scanner`, `credential_access_guard`, `filesystem_guard`, `prompt_credential_guard`, log-time masking |
 | [LLM03](https://genai.owasp.org/llmrisk/llm032025-supply-chain/) | Supply Chain | `supply_chain_guard`, `git_guard`, `container_first` |
 | [LLM05](https://genai.owasp.org/llmrisk/llm052025-improper-output-handling/) | Improper Output Handling | `output_credential_scanner`, `subagent_stop_guard`, `agent_output_guard`, `injection_defense` |
@@ -869,7 +869,7 @@ guard only as far as `ask`. See [configuration](configuration.md).
 switched-off guard reports *below* `allow`, so no severity-based alert will surface it. See
 [known gaps](logging/00-field-reference.md#known-gaps).
 
-**Behavioral rules are not enforced.** `/forcefield:harden` writes rules into a project's
+**Behavioral rules are not enforced.** `/forcefield:full-power-to-shields` writes rules into a project's
 `CLAUDE.md` for what hooks physically cannot check, such as whether Claude echoes a credential in
 a response. Those depend on the model following them.
 

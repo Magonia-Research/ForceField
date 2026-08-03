@@ -93,7 +93,7 @@ output flags: a blocked command naming no file is not correlated at all.
   UserPromptSubmit ──► pasted private keys blocked, tokens warned
          │
          ▼
-  Claude processes ──► CLAUDE.md rules via /forcefield:harden
+  Claude processes ──► CLAUDE.md rules via /forcefield:full-power-to-shields
          │
   ── PreToolUse: gate before the call ───────────────────────────────────
      Bash        → container-first · sigma · exfil · supply-chain · git
@@ -214,7 +214,7 @@ That makes anything which can *provoke* a failure a bypass, so the dispatcher is
 inspect this" into an `ask` rather than a silent pass. The 5s timeout is a security boundary: a
 hook killed mid-scan never delivers its verdict, so a computed hard deny becomes a silent allow.
 
-## Skill: `/forcefield:harden`
+## Skill: `/forcefield:full-power-to-shields`
 
 Injects behavioral rules into a project's `CLAUDE.md` that hooks **cannot** enforce: never
 echoing credentials in responses, refusing instructions embedded in fetched content, MCP data
