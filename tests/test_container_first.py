@@ -187,6 +187,9 @@ def elapsed(command, **kw):
 # The 5s timeout asserted against further down is read from here rather than
 # restated, so a change to the registration cannot leave the timing cases
 # measuring against a number the harness no longer uses.
+#
+# hooks.json states seconds; this file works in milliseconds, so the conversion
+# happens once, here.
 
 _hooks = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
 _entries = [
@@ -200,7 +203,7 @@ assert len(_entries) == 1, "expected exactly one registration, got %r" % (_entri
 _event, _matcher, _entry = _entries[0]
 assert _event == "PreToolUse", _event
 assert _matcher == "Bash", _matcher
-TIMEOUT_MS = _entry["timeout"]
+TIMEOUT_MS = _entry["timeout"] * 1000
 assert TIMEOUT_MS == 5000, "the timing cases below assume a 5s budget"
 print("PASS: registered once at PreToolUse[Bash] with a %dms budget" % TIMEOUT_MS)
 

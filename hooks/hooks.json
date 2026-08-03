@@ -8,17 +8,17 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/container_first.sh",
-            "timeout": 5000
+            "timeout": 5
           },
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/sigma_engine.py",
-            "timeout": 5000
+            "timeout": 5
           },
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/security_dispatcher.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       },
@@ -28,7 +28,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/credential_guard.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       },
@@ -38,7 +38,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/mcp_guard.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       },
@@ -48,7 +48,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/agent_guard.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       },
@@ -58,7 +58,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/webfetch_guard.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       },
@@ -68,7 +68,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/filesystem_guard.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       },
@@ -78,7 +78,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/filesystem_guard.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -90,7 +90,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/output_credential_scanner.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       },
@@ -100,12 +100,12 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/injection_defense.py",
-            "timeout": 5000
+            "timeout": 5
           },
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/output_credential_scanner.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       },
@@ -115,7 +115,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/agent_output_guard.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -127,7 +127,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/prompt_credential_guard.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -139,17 +139,17 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/sigma_update.sh",
-            "timeout": 10000
+            "timeout": 10
           },
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session_baseline.py",
-            "timeout": 5000
+            "timeout": 5
           },
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/repo_audit.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -161,7 +161,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/file_watch_guard.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -173,7 +173,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session_baseline.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -185,7 +185,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/session_cleanup.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -197,7 +197,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/permission_outcome.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -209,7 +209,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/subagent_stop_guard.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -221,7 +221,7 @@
           {
             "type": "command",
             "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/stop_checklist.py",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }

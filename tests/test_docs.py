@@ -288,6 +288,16 @@ with open(os.path.join(ROOT, "hooks", "hooks.json"), encoding="utf-8") as handle
 registrations = sum(len(entry.get("hooks", []))
                     for matchers in events.values() for entry in matchers)
 
+# `timeout` is SECONDS: Claude Code multiplies it by 1000 before the abort
+# signal. Shipped as 5000/10000 through 2.0.0, which is 83 minutes, so the
+# fail-open budget the scan cap and bounded lock are written against did not
+# exist. A ceiling, not the exact values, since those are free to move.
+_timeouts = [hook.get("timeout") for matchers in events.values()
+             for entry in matchers for hook in entry.get("hooks", [])]
+check(all(isinstance(t, int) and 0 < t <= 60 for t in _timeouts),
+      "every hooks.json timeout is a seconds-scale integer, not milliseconds "
+      "(got %r)" % sorted({t for t in _timeouts}))
+
 WORDS = {18: "eighteen", 19: "nineteen", 20: "twenty", 21: "twenty-one",
          22: "twenty-two", 23: "twenty-three"}
 check(registrations in WORDS, "the hook count is inside the spelled-out range")
