@@ -76,6 +76,7 @@ instead of a question. Read the log either way. The four presets are `balanced`,
 | | Keys in tool output, and in the log itself | redact |
 | [Excessive agency](docs/threat-model.md#excessive-agency) | Credentials in subagent prompts, spawn rate limit | **deny** |
 | [MCP tool poisoning](docs/threat-model.md#mcp-tool-poisoning) | Credential and exfil patterns in any tool's arguments | ask |
+| [Known attacker behavior](docs/threat-model.md#known-attacker-behavior-from-sigmahq) | 106 compiled SigmaHQ rules: audit, firewall and backup tampering, in-memory execution, discovery, mining | warn, ask under `strict` |
 
 Commands are shell-normalized before matching, so `${IFS}`, backslash escapes and intra-word
 quoting do not evade a pattern.

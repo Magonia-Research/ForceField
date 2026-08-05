@@ -23,6 +23,7 @@ shown above it. The envelope fields those records share are documented in
 | 6 | [Excessive agency](#excessive-agency) | `agent_guard` |
 | 7 | [MCP tool poisoning](#mcp-tool-poisoning) | `mcp_guard` |
 | 8 | [Hidden and obfuscated payloads](#hidden-and-obfuscated-payloads) | `injection_defense`, `container_first` |
+| 9 | [Known attacker behavior, from SigmaHQ](#known-attacker-behavior-from-sigmahq) | `sigma_engine`, `sigma_update`, `sigma_compiler` |
 | | [OWASP mapping](#owasp-mapping) · [Scope limits](#scope-limits) | |
 
 ---
@@ -819,6 +820,168 @@ platforms.
 
 ---
 
+## Known attacker behavior, from SigmaHQ
+
+**Hooks:** `sigma_engine` (PreToolUse[Bash]), fed by `sigma_update` (SessionStart) and compiled
+offline by `sigma_compiler`.
+
+Every class above is a pattern this repository wrote against a named disclosure. This one is not
+ours. It is the [SigmaHQ](https://github.com/SigmaHQ/sigma) corpus — the detection community's
+shared rule set — compiled to JSON and evaluated against the command before it runs, so coverage
+tracks what other people publish rather than what ForceField anticipated.
+
+What that buys is the second half of an intrusion. The guards above watch the ways in: the clone,
+the install, the fetch, the prompt. Sigma watches what a foothold does next, which is a different
+vocabulary entirely — audit rules deleted, the firewall dropped, backups turned off, history
+scrubbed, a miner started, a payload compiled in memory and never written to disk. No pattern
+elsewhere in this document looks for any of it.
+
+It is also the one layer that is off until you ask for it. `scripts/install.sh` clones SigmaHQ and
+compiles the ruleset; with no ruleset the engine returns silence, and every other guard works
+regardless.
+
+### The compile funnel
+
+Rules are compiled offline and evaluated online, because the evaluator has to be stdlib-only and
+fit inside a 5s fail-open budget. The compiler keeps only what this environment can actually
+decide.
+
+Measured against SigmaHQ at `226e0f8` (2026-08-03), which is the compile that ships as
+`~/.claude/forcefield/sigma/rules.json`:
+
+| Stage | Count |
+|---|---|
+| `process_creation` rule files for `linux` and `macos` | 192 (189 from `rules/`, 3 from `rules-threat-hunting/`) |
+| dropped below the `medium` severity cut | 53 (42 `low`, 11 `informational`) |
+| dropped for a condition grammar the compiler does not parse | 23 |
+| dropped for naming a field this environment cannot supply | 10 |
+| **compiled** | **106** — 67 `medium`, 39 `high`, no `critical` |
+
+The 10 dropped for an unavailable field are the honest part of the number. A Claude Code `Bash`
+call gives a hook one command string and no process tree, so `ParentImage`,
+`ParentCommandLine`, `ParentUser`, `IntegrityLevel`, `LogonId` and `Hashes` have no value to
+compare against. A rule keyed on them would either never fire or fire on everything, and a
+detection that cannot be evaluated is dropped rather than approximated.
+
+The 23 grammar drops are ordinary technical debt: 17 distinct condition strings the parser does
+not cover yet, led by `selection and not 1 of filter_main_*`. They are silent — nothing in the
+pipeline reports a rule it skipped, so the shipped count is a floor on what the corpus offers and
+not a measure of it.
+
+### What a match does, and what it never does
+
+A match is an `ask`. It is never a `deny`, in any configuration — `sigma_engine`'s ceiling in
+`config.py` is `ask`, and the [clamp is downgrade-only](configuration.md), so no preset and no
+config file can promote it. That is deliberate: the deny tier here is reserved for patterns with
+no legitimate reading, and a corpus of broad community heuristics is the opposite of that.
+`python3 -m http.server 8080` matches a rule and is also how half the world serves a directory.
+
+Then the shipped default softens it again. Under `balanced` a match is a logged warning with the
+alert text injected as context, and **no prompt at all**:
+
+Triggered by: `auditctl -D`
+
+```json
+{
+  "Attributes": {
+    "command.line": "auditctl -D",
+    "forcefield.config_downgraded": true,
+    "forcefield.decision": "warn",
+    "forcefield.guard": "sigma_engine",
+    "forcefield.natural": "ask",
+    "forcefield.pattern": "bed26dea-4525-47f4-b24a-76e30e44ffb0"
+  },
+  "Body": "sigma_engine: warn (bed26dea-4525-47f4-b24a-76e30e44ffb0)",
+  "EventName": "forcefield.sigma_engine",
+  "SeverityNumber": 13,
+  "SeverityText": "WARN"
+}
+```
+
+`forcefield.natural` is `ask` and `forcefield.decision` is `warn`, with
+`forcefield.config_downgraded` recording that the two differ. Run `strict` and the same command
+prompts instead. Nothing else in this document is advisory by default; this is the guard whose
+false-positive rate justifies it.
+
+| Preset | Rung on a match | Severity floor | Effect |
+|---|---|---|---|
+| `strict` | ask | `low` | Prompts. The floor is nominal: the shipped ruleset is compiled at `medium` and above, so nothing below it exists to admit without a recompile at `--min-level low`. |
+| `balanced` (shipped) | warn | `medium` | All 106 rules evaluate; a match is a log record plus context. |
+| `permissive` | warn | `high` | Drops the 67 `medium` rules. Measured: `python3 -m http.server 8080` goes silent, `auditctl -D` still warns. |
+| `passive` | warn | `medium` | Same as `balanced`. There is no friction to buy back, because the guard was never prompting. |
+
+**The record does not carry the rule's severity.** `SeverityNumber` is the decision's, so a
+`high` rule clamped to `warn` logs at 13 exactly like a `medium` one. `forcefield.pattern` carries
+the rule UUID, and that is what you look up in `rules.json` to get the level, the title and the
+ATT&CK tags. At most three alerts are reported for one command; a command that trips a dozen broad
+rules would otherwise bury its own finding.
+
+### Five fields, and the leading-token limit
+
+The engine synthesizes five Sigma fields from a Bash call: `CommandLine` (the command verbatim),
+`Image` and `OriginalFileName` (both the first token, with `sudo`, `env`, `nice`, `nohup`,
+`timeout` and `strace` skipped and a leading `VAR=value` skipped), `CurrentDirectory` and `User`.
+No rule in this compile references either of the last two.
+
+`Image` being the *first* token is the sharpest limit in this section. **83 of the 106 rules
+cannot fire unless the binary they name leads the command line**; the other 23 match on
+`CommandLine` and fire anywhere in it. Measured:
+
+| Command | `Image` | Result |
+|---|---|---|
+| `auditctl -D` | `/auditctl` | matches |
+| `FOO=bar auditctl -D` | `/auditctl` | matches |
+| `cd /tmp && auditctl -D` | `/cd` | **no match** |
+| `timeout 5 auditctl -D` | `/5` | **no match** — the wrapper is skipped, its argument is not |
+| `bash -c 'auditctl -D'` | `/bash` | **no match** |
+| `cd /tmp && ufw disable` | `/cd` | matches — `ufw` is one of the 23 |
+
+So this layer is a tripwire, not a filter. Anything that survives being written as
+`cd x && <payload>` was never going to be caught by an `Image`-anchored rule, and unlike the
+`sh -c` bodies `supply_chain_guard` unpacks, the Sigma engine does not descend into a wrapped
+command. It catches the direct spelling, which is the spelling that appears when nobody is trying
+to evade anything — a compromised dependency's postinstall, a copied-in "fix", an agent following
+a poisoned README.
+
+### The rule corpus is untrusted input, twice
+
+A detection corpus this project does not write is a supply chain like any other, and it enters
+along two paths that have nothing to do with each other.
+
+**As code that runs unattended.** `sigma_update.sh` pulls SigmaHQ every 24 hours at session start,
+and a repository being updated on a timer with nobody watching is exactly the surface
+[section 1](#repository-takeover-at-clone-time) is about. So the pull is the hardened form —
+`git -c core.hooksPath=/dev/null pull --no-recurse-submodules` — the same command ForceField
+demands of you. Setting `SIGMA_REF` to a tag or a reviewed commit pins the corpus there and stops
+it advancing on its own; unset, it tracks `master`. The compiler runs in a venv under
+`~/.claude/forcefield/sigma/`, outside the plugin directory that every reinstall replaces, and
+that placement is also what puts both artifacts behind a write prompt: a shell write anywhere
+under `~/.claude/forcefield/` asks, and the venv python it protects is executed at every session
+start.
+
+**As text the model reads.** A rule's `title`, `description` and `references` are copied into the
+`permissionDecisionReason` and the injected context — third-party YAML landing in a TIER 1
+position, inside the one guard whose entire input is third-party. A rule titled with a role tag
+or an instruction override would arrive as part of ForceField's own security message.
+`sanitize_rule_text` collapses control characters and newlines, rewrites `<` and `>` to
+parentheses so a role tag stops being one, and caps each field. That removes the shapes that
+carry authority; it is not a claim to have made arbitrary prose safe. The corpus is worth
+reading before you trust it, which is the same advice this document gives about every other
+repository.
+
+**Sources.** [SigmaHQ](https://github.com/SigmaHQ/sigma) is the rule corpus and the
+[Sigma specification](https://github.com/SigmaHQ/sigma-specification) is the rule format;
+detections carry [MITRE ATT&CK](https://attack.mitre.org/) tactic and technique tags, which the
+alert message translates into plain language. The 106 shipped rules carry 57 distinct technique
+tags; by the corpus's own tactic vocabulary they are led by execution (41), stealth (23) and
+discovery (20).
+
+**OWASP:** [LLM06 Excessive Agency](https://genai.owasp.org/llmrisk/llm062025-excessive-agency/) ·
+[LLM03 Supply Chain](https://genai.owasp.org/llmrisk/llm032025-supply-chain/) — the second one
+twice over, since the ruleset is itself a dependency.
+
+---
+
 ## OWASP mapping
 
 Against the
@@ -831,7 +994,7 @@ The 2025 edition renumbered several categories, and the IDs below are the curren
 | [LLM02](https://genai.owasp.org/llmrisk/llm022025-sensitive-information-disclosure/) | Sensitive Information Disclosure | `credential_guard`, `output_credential_scanner`, `credential_access_guard`, `filesystem_guard`, `prompt_credential_guard`, log-time masking |
 | [LLM03](https://genai.owasp.org/llmrisk/llm032025-supply-chain/) | Supply Chain | `supply_chain_guard`, `git_guard`, `container_first` |
 | [LLM05](https://genai.owasp.org/llmrisk/llm052025-improper-output-handling/) | Improper Output Handling | `output_credential_scanner`, `subagent_stop_guard`, `agent_output_guard`, `injection_defense` |
-| [LLM06](https://genai.owasp.org/llmrisk/llm062025-excessive-agency/) | Excessive Agency | `agent_guard`, `container_first`, `mcp_guard` |
+| [LLM06](https://genai.owasp.org/llmrisk/llm062025-excessive-agency/) | Excessive Agency | `agent_guard`, `container_first`, `mcp_guard`, `sigma_engine` |
 
 Beyond the LLM list,
 [OWASP Top 10 CI/CD Security Risks](https://owasp.org/www-project-top-10-ci-cd-security-risks/)
@@ -839,6 +1002,11 @@ covers the clone-time and pipeline surface, and
 [OWASP Agentic AI](https://genai.owasp.org/resource/agentic-ai-threats-and-mitigations/) is the
 agentic taxonomy. Detection coverage also maps to
 [MITRE ATLAS](https://github.com/mitre-atlas/atlas-data).
+
+The [Sigma layer](#known-attacker-behavior-from-sigmahq) is indexed on
+[MITRE ATT&CK](https://attack.mitre.org/) rather than on either OWASP list, because the corpus is
+tagged that way upstream. It is the only part of ForceField whose taxonomy someone else maintains,
+and the only part whose coverage changes without a commit here.
 
 ---
 
@@ -858,6 +1026,13 @@ hook `deny` is absolute in every mode.
 **Guards are heuristics over text.** They match commands and payloads, not intent. A novel
 encoding, a payload assembled at runtime, or an action taken through a tool ForceField does not
 gate will pass.
+
+**The Sigma layer is opt-in, advisory by default, and anchored on the first token.** It does
+nothing until `scripts/install.sh` compiles a ruleset, it warns rather than prompts under the
+shipped `balanced` preset, and 83 of its 106 rules need the binary they name to lead the command
+line — so `cd x && <payload>` defeats them. Treat it as a tripwire on the direct spelling of known
+attacker behavior, not as a control. See
+[known attacker behavior](#known-attacker-behavior-from-sigmahq).
 
 **Config can only loosen.** The tiered clamp moves a decision *down* the ladder and can never
 fabricate a stricter one, so the zero-false-positive guarantee on the deny tier survives any

@@ -69,11 +69,26 @@ Triggered by: `rm -rf /`
 
 ### `sigma_engine.py`
 
-`PreToolUse[Bash]`. Compiled SigmaHQ `process_creation` rules. `forcefield.pattern` carries the rule UUID, which is what you look the rule up by. This capture also shows the config clamp: the engine wanted `ask`, the `balanced` preset caps it at `warn`.
+`PreToolUse[Bash]`. Compiled SigmaHQ `process_creation` rules. `forcefield.pattern` carries the rule UUID, which is what you look the rule up by — the record does not carry the rule's own severity, so `SeverityNumber` here is the decision's and not the rule's. This capture also shows the config clamp: the engine wanted `ask`, the `balanced` preset caps it at `warn`. With no compiled ruleset the hook writes no record at all.
 
 Triggered by: `auditctl -D`
 
-**No record written.**
+```json
+{
+  "Attributes": {
+    "command.line": "auditctl -D",
+    "forcefield.config_downgraded": true,
+    "forcefield.decision": "warn",
+    "forcefield.guard": "sigma_engine",
+    "forcefield.natural": "ask",
+    "forcefield.pattern": "bed26dea-4525-47f4-b24a-76e30e44ffb0"
+  },
+  "Body": "sigma_engine: warn (bed26dea-4525-47f4-b24a-76e30e44ffb0)",
+  "EventName": "forcefield.sigma_engine",
+  "SeverityNumber": 13,
+  "SeverityText": "WARN"
+}
+```
 
 ### `exfil_guard` (deny)
 
