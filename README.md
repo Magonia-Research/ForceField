@@ -18,9 +18,10 @@ git -c core.hooksPath=/dev/null clone --no-recurse-submodules \
     https://github.com/Magonia-Research/ForceField.git
 ```
 
-That is longer than `git clone` on purpose, and it is the same command ForceField will ask you
-for the next time you clone anything: hooks cannot run out of the repository being fetched, and
-no config level can recurse submodules behind you. See
+That is longer than `git clone` on purpose, and it is the same command ForceField will hand you
+the next time you clone anything: hooks cannot run out of the repository being fetched, and no
+config level can recurse submodules behind you. The plain spelling is blocked rather than
+prompted, so the redirect is the path rather than a suggestion. See
 [the clone redirect](docs/threat-model.md#the-clone-redirect).
 
 The repo ships `.claude-plugin/marketplace.json`, so add the checkout as a marketplace rather
@@ -65,7 +66,7 @@ instead of a question. Read the log either way. The four presets are `balanced`,
 | Class | Examples | Rung |
 |---|---|---|
 | [Clone-time repo takeover](docs/threat-model.md#repository-takeover-at-clone-time) | CVE-2024-32002 and CVE-2025-48384 submodule surface, 17 RCE-capable git config keys, `.git/hooks` writes | ask, graded on evidence |
-| | Any `git clone` that has not disarmed that surface | ask, with the hardened command |
+| | Any `git clone` (or `gh repo clone`) that has not disarmed that surface | **deny**, with the hardened command |
 | | `git clone ext::`, which hands its URL to a shell | **deny** |
 | [Data exfiltration](docs/threat-model.md#data-exfiltration) | Relay and tunneling domains, netcat, `/dev/tcp` reverse shells | **deny** |
 | | Data POSTs, DNS-label encoding, cloud metadata SSRF, `scp`/`rsync` | ask |
@@ -91,10 +92,15 @@ actual exploit signature. See [how a finding is graded](docs/threat-model.md#how
 and SSH remotes the in-hook fetch will not touch. It uses `--no-checkout`, because both CVEs fire
 during checkout. A recorded `DO NOT CLONE` then denies the clone itself rather than prompting on it.
 
-**Every other clone is redirected, not judged.** A plain `git clone` prompts, and the reason
-carries the command that would not have — the one in [Install](#install), with your URL spliced
-in. Run that and there is no prompt. It does not stop on a patched git, because disabling hooks
-and refusing submodule recursion are not patches for either CVE.
+**Every other clone is redirected, not judged.** A plain `git clone` is **blocked**, and the
+reason carries the command that would not have been — the one in [Install](#install), with your
+URL spliced in, in whichever tool you used. Run that and there is no prompt and no block. It
+clears the zero-false-positive bar for the same reason `rm -rf` does: every clone has a hardened
+spelling of *itself* that fetches the identical tree, so the block forbids no task. The one clone
+that cannot be hardened is the one asking for submodules on purpose — `--recurse-submodules`
+contradicts the flag that would harden it — and that one still prompts rather than blocking. The
+block does not lift on a patched git, because disabling hooks and refusing submodule recursion are
+not patches for either CVE.
 
 ## Check what a hook decides
 
@@ -113,7 +119,7 @@ because the prompt would have cited a bug that cannot fire there:
  "additionalContext": "ForceField security finding (advisory - the call was not blocked): GIT GUARD: submodule_update (context only)\n\nMatched: git submodule update --init\ngit 2.50.1 is patched for CVE-2024-32002 and CVE-2025-48384, so the clone-time RCE path is closed here.\n\nStill treat the repository's contents as untrusted: a clean .gitmodules says nothing about what the code does once you run it."}}
 ```
 
-A clone is the one shape where a patched git is not the whole answer, so it prompts on any host —
+A clone is the one shape where a patched git is not the whole answer, so it blocks on any host —
 and says what to run instead:
 
 ```bash

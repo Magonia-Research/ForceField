@@ -269,8 +269,11 @@ Triggered by: `git submodule update --init --recursive`
 ### `git_guard` (unhardened clone)
 
 `PreToolUse[Bash], via security_dispatcher.py`. Every clone that has not disarmed the clone-time
-execution surface, redirected to the hardened command rather than only reported. This one does
-not downgrade on a patched host: what it asks for is not a patch for either CVE.
+execution surface, redirected to the hardened command rather than only reported. It is a `deny`
+rather than an `ask` because the redirect fetches an identical tree, so the block costs a
+spelling and not a task — and being a natural deny is also what puts it beyond a project-shipped
+allowlist, since the dispatcher gates suppression on the decision. It does not downgrade on a
+patched host: what it asks for is not a patch for either CVE.
 
 Triggered by: `git clone https://github.com/example/repo.git`
 
@@ -278,15 +281,15 @@ Triggered by: `git clone https://github.com/example/repo.git`
 {
   "Attributes": {
     "command.line": "git clone https://github.com/example/repo.git",
-    "forcefield.decision": "ask",
+    "forcefield.decision": "deny",
     "forcefield.guard": "git_guard",
-    "forcefield.natural": "ask",
+    "forcefield.natural": "deny",
     "forcefield.pattern": "unhardened_clone"
   },
-  "Body": "git_guard: ask (unhardened_clone)",
+  "Body": "git_guard: deny (unhardened_clone)",
   "EventName": "forcefield.git_guard",
-  "SeverityNumber": 14,
-  "SeverityText": "WARN"
+  "SeverityNumber": 17,
+  "SeverityText": "ERROR"
 }
 ```
 

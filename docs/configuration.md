@@ -269,9 +269,12 @@ one project (home config only).
 > An allowlist only removes the prompt, and it removes it on unpatched hosts too, where the prompt
 > was the last thing standing.
 >
-> **`unhardened_clone` is the one to reach for last**, because it is the one with a free exit.
-> Every other entry in this table trades a prompt for accepted risk; this one is answered by
-> typing a longer command, and the prompt tells you which. Allowlisting it turns every clone in
-> that project silent again, including the clones you did not type.
+> **`unhardened_clone` cannot be allowlisted at all**, because it is a `deny` and the dispatcher
+> refuses project suppression for any git finding whose decision is `deny` — otherwise a repo
+> could ship a `.claude/hook-allowlist.json` that waved through its own clone. It is also the one
+> entry here that never needed suppressing: every other entry trades a prompt for accepted risk,
+> while this one is answered by typing a longer command, and the block tells you which. If you
+> genuinely want it back to a prompt, that is a `preset` decision — `permissive` caps `git_guard`
+> at `ask` — not an allowlist one.
 
 If ForceField is broadly too loud, set a `preset` once rather than disabling guards one at a time.

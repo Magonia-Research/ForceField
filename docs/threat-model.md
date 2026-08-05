@@ -42,11 +42,11 @@ clone it.
 | Covered | How | Rung |
 |---|---|---|
 | **CVE-2024-32002** (9.0 Critical) and **CVE-2025-48384** (8.0 High), the two clone-time RCE bugs | 3 patterns on the submodule trigger surface, graded on the host's git version and the repository's actual `.gitmodules` | `ask`, moving to `warn` on a patched host or `deny` on a measured exploit signature |
-| **The `ext::` transport**, which hands its URL to a shell | 1 pattern | **`deny`**, the only git primitive that hard-denies |
+| **The `ext::` transport**, which hands its URL to a shell | 1 pattern | **`deny`**, the only git *primitive* that hard-denies |
 | **17 git config keys whose values a later routine command executes** (`core.hooksPath`, `core.sshCommand`, `core.pager`, `credential.helper`, `diff.external`, and the rest) | 4 patterns covering the config, `-c`, environment-variable and template-directory spellings | `ask`, on every host, patched or not |
 | **Writes to `.git/hooks/` and to any of the four git config levels** | 2 patterns, including paths that never contain the literal `.git/…hooks/` substring | `ask` |
 | **A shell alias**, which runs the moment it is invoked | 1 pattern, matching only `alias.<name>` values starting with `!` | `ask` |
-| **Every clone that has not disarmed the above**, including the `gh repo clone` spelling | 1 pattern, redirecting to a named hardened command rather than only reporting | `ask` until the clone is hardened, then silent |
+| **Every clone that has not disarmed the above**, including the `gh repo clone` spelling | 1 pattern, redirecting to a named hardened command rather than only reporting | **`deny`** until the clone is hardened, then silent. A clone that asks for submodules on purpose cannot be hardened and keeps its `ask` |
 
 | Not covered | Why |
 |---|---|
@@ -116,7 +116,7 @@ Twelve patterns, eleven of which **ask**, one of which **denies**.
 | `git_ext_transport_rce` | **deny** | `ext::` in a URL on `clone\|fetch\|pull\|push\|remote\|submodule\|ls-remote\|archive`. |
 | `git_hooks_dir_write` | ask | A write verb targeting `.git/hooks/`, `.git/modules/*/hooks/`, `$GIT_DIR/**/hooks/`, or a path from `git rev-parse --git-path hooks`. |
 | `git_config_file_write` | ask | A write verb targeting `.git/config`, `.git/modules/*/config`, `~/.gitconfig`, `~/.config/git/config`, or `/etc/gitconfig`. Any of the four config levels can set `core.hooksPath`. |
-| `unhardened_clone` | ask | Any `git clone` — or `gh repo clone` — that has not set an inert `core.hooksPath` *and* passed `--no-recurse-submodules`. Checked last, so a clone that also recurses, sets an RCE key or names an `ext::` URL keeps its more specific finding. See [the redirect](#the-clone-redirect). |
+| `unhardened_clone` | **deny** | Any `git clone` — or `gh repo clone` — that has not set an inert `core.hooksPath` *and* passed `--no-recurse-submodules`. Checked last, so a clone that also recurses keeps its more specific finding; a clone carrying an RCE key or `ext::` URL reports that pattern but cannot come out *softer* than the block. `--help`, and the word appearing inside an argument rather than as the subcommand, are not clones. See [the redirect](#the-clone-redirect). |
 
 **`ext::` earns the hard deny** because the transport hands its URL to the shell:
 `git clone "ext::sh -c payload"` runs `payload`, and git ships it disabled by default for exactly
@@ -151,12 +151,33 @@ rest, which is nearly all of them: a plain `git clone <url>` matched nothing at 
 still the command that fetches attacker-controlled content and lets git decide what to execute
 while doing it.
 
-It is a redirect, not a wall. The finding names one command, and running that command makes it
-go away:
+It is **denied**, and it is still a redirect rather than a wall. The finding names one command,
+and running that command makes it go away:
 
 ```bash
 git -c core.hooksPath=/dev/null clone --no-recurse-submodules <url>
 ```
+
+`gh repo clone` is redirected in its own tool rather than to plain `git`, because `gh` carries
+auth a bare `git clone` may not have — a redirect the user cannot follow is a wall with extra
+steps. `gh` passes everything after `--` to `git clone`, and `--config` is accepted there where
+the global `-c` cannot be threaded through:
+
+```bash
+gh repo clone <repo> -- --config core.hooksPath=/dev/null --no-recurse-submodules
+```
+
+**Why a block clears the zero-false-positive bar.** The deny tier is reserved for patterns with
+no honest reading, and "you are cloning a repository" plainly has one. What makes this a deny
+anyway is the same property that lets `rm -rf` deny in favour of `trash`: every clone has a
+hardened spelling *of itself* that fetches a byte-identical tree, so the block forbids no task —
+it only forbids a spelling. The redirect is therefore load-bearing, not advisory, which is why
+the target is spliced into it and why the `gh` form exists at all.
+
+The exception is the clone that asks for submodules on purpose. `--recurse-submodules`
+contradicts `--no-recurse-submodules`, so there is no hardened spelling of *that* command; the
+alternative is a different workflow (hardened clone, read `.gitmodules`, then
+`git submodule update --init`), and choosing it is a judgement call. That one keeps its `ask`.
 
 Neither half is decoration.
 
@@ -178,8 +199,21 @@ overrides all four levels.
 Because neither of those is a bug that a git release closed, this finding does **not** downgrade
 on a patched host — and on a clone it stands in place of the CVE downgrade. Without that,
 `git clone --recursive <url>`, which cannot be hardened by construction, would go quiet on a
-patched host while the strictly safer `git clone <url>` still prompted, and a README that asked
-for `--recursive` would buy *less* friction than one that did not.
+patched host while the strictly safer `git clone <url>` still gated it.
+
+One ordering consequence is worth naming rather than discovering. On a patched host a plain
+`git clone <url>` now *blocks* while `git clone --recursive <url>` only *prompts*, so friction no
+longer rises with danger. Nothing got looser — both were `ask` before, and the recursive form
+still prompts with its full CVE text — but the recursive case is precisely the one where the
+safer path is a different workflow rather than a different spelling, and that is a decision the
+prompt exists to put in front of you.
+
+A second finding on the same command line can add to the block but never lower it. `_first_match`
+returns the first pattern and `unhardened_clone` is checked last, so
+`GIT_ASKPASS=true git clone <url>` reports `git_env_rce` — and once the clone began to deny, that
+ordering would otherwise have meant prefixing an environment variable bought a *downgrade* from
+the bare clone's block. The companion pattern is now reported alongside the deny instead of in
+place of it.
 
 Triggered by: `git clone https://github.com/example/repo.git`
 
@@ -187,15 +221,15 @@ Triggered by: `git clone https://github.com/example/repo.git`
 {
   "Attributes": {
     "command.line": "git clone https://github.com/example/repo.git",
-    "forcefield.decision": "ask",
+    "forcefield.decision": "deny",
     "forcefield.guard": "git_guard",
-    "forcefield.natural": "ask",
+    "forcefield.natural": "deny",
     "forcefield.pattern": "unhardened_clone"
   },
-  "Body": "git_guard: ask (unhardened_clone)",
+  "Body": "git_guard: deny (unhardened_clone)",
   "EventName": "forcefield.git_guard",
-  "SeverityNumber": 14,
-  "SeverityText": "WARN"
+  "SeverityNumber": 17,
+  "SeverityText": "ERROR"
 }
 ```
 
@@ -264,7 +298,9 @@ above, where the same field reads `ask`.
 
 **The two clone-shaped patterns no longer reach this branch.** `recursive_submodule_clone` and a
 bare clone both carry `unhardened_clone` underneath them, which the patch does not close, so on a
-patched host a clone keeps its ask and gets the hardened command instead of a downgrade. The
+patched host a clone gets the hardened command instead of a downgrade — the bare clone as a
+block, the recursive one as a prompt, since only the bare clone has a hardened spelling of
+itself. The
 downgrade still applies in full to the spellings that act inside a checkout you already have:
 `git submodule update`, and a `pull`/`fetch`/`checkout` that recurses.
 

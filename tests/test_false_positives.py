@@ -171,6 +171,29 @@ PLAIN_BENIGN = (
     ("heredoc-note", "cat > NOTES.md <<'EOF'\nremember to rotate the token\nEOF"),
     ("ps-grep", "ps aux | grep -v grep | grep python"),
     ("tail-log", "tail -n 50 /var/log/system.log"),
+    # Clone-shaped text and clone-adjacent reads. `unhardened_clone` is the one
+    # pattern that sees EVERY clone rather than a flagged minority, and it
+    # denies, so it carries more false-positive risk than anything else in the
+    # git guard -- yet this corpus had no clone in it at all while the finding
+    # was an ask. `commit-message-clone` is the case that actually regressed:
+    # the segment IS led by `git`, so only a subcommand walk tells an ordinary
+    # commit from a clone. Reading the documentation must not be a block either.
+    ("clone-help", "git clone --help"),
+    ("clone-help-short", "git clone -h"),
+    ("gh-clone-help", "gh repo clone --help"),
+    ("git-help-clone", "git help clone"),
+    ("commit-message-clone", 'git commit -m "fix the git clone docs"'),
+    ("commit-message-gh-clone", 'git commit -m "gh repo clone notes"'),
+    ("clone-prose-append", "echo 'run git clone later' >> NOTES.md"),
+    ("clone-grep", "grep -rn 'git clone' docs/"),
+    ("clone-rg", "rg 'gh repo clone'"),
+    ("clone-log-grep", "git log --grep clone"),
+    # The redirect the guard itself prints must never be denied by the guard --
+    # a block whose own replacement is blocked is a wall with extra steps.
+    ("hardened-clone-git",
+     "git -c core.hooksPath=/dev/null clone --no-recurse-submodules https://x/y"),
+    ("hardened-clone-gh",
+     "gh repo clone o/r -- --config core.hooksPath=/dev/null --no-recurse-submodules"),
 )
 
 
