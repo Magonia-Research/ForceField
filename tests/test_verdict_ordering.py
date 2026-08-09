@@ -47,6 +47,7 @@ ordering are one fix and not two.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -260,6 +261,112 @@ for _entry in sorted(_covered):
           "ordering case %r is not a registration in hooks.json" % (_entry,))
 print("PASS: all %d hooks.json registrations have an ordering case"
       % len(REGISTRATIONS))
+
+
+# ---------------------------------------------------------------------------
+# Every hookSpecificOutput carries the discriminant that makes it deliverable
+# ---------------------------------------------------------------------------
+#
+# The same fail-open this suite is about, reached by a different route. A
+# verdict killed at the timeout is never written; a verdict written without
+# ``hookSpecificOutput.hookEventName`` is written and then discarded, because
+# that field is the discriminant of a union and Claude Code rejects the whole
+# response for its absence -- ``hookSpecificOutput is missing required field
+# "hookEventName"``, verbatim in the 2.1.222 binary -- before the branch that
+# would apply it. Neither is visible from inside the hook: stdout looks right
+# and the record says the guard acted.
+#
+# ``output_credential_scanner`` shipped that way. Its redaction branch fires
+# only on a high-confidence live credential, so every occurrence handed the
+# model a secret the hook had already decided to strip, and deferred a
+# ``redact`` record saying otherwise. Checked statically over every source
+# rather than by driving each hook: the defect is an absent key, so a runtime
+# probe only sees it on the branch it happens to reach, and reaching this one
+# takes a real credential.
+
+def hook_event_literals(source, label):
+    """(line, event) for every ``hookSpecificOutput`` dict literal in a module.
+
+    ``event`` is the ``hookEventName`` constant, or ``None`` when the literal
+    omits it. A value that is not a dict literal -- ``dict(hso)`` in
+    ``agent_guard``'s merge, which copies a response ``clamp_and_emit`` already
+    built -- has no key list to read and is skipped; its discriminant is
+    asserted where it is written.
+    """
+    found = []
+    for node in ast.walk(ast.parse(source, filename=label)):
+        if not isinstance(node, ast.Dict):
+            continue
+        # A ``**spread`` member puts None in ``keys`` at the matching index, so
+        # every key is type-checked before it is read.
+        for key, value in zip(node.keys, node.values):
+            if not isinstance(key, ast.Constant):
+                continue
+            if key.value != "hookSpecificOutput":
+                continue
+            if not isinstance(value, ast.Dict):
+                continue
+            event = None
+            for name, literal in zip(value.keys, value.values):
+                if (isinstance(name, ast.Constant)
+                        and name.value == "hookEventName"
+                        and isinstance(literal, ast.Constant)):
+                    event = literal.value
+            found.append((value.lineno, event))
+    return found
+
+
+# What each source may name, read from hooks.json rather than restated.
+# ``hook_logging`` is not registered itself, but ``clamp_and_emit`` builds the
+# response for the PreToolUse guards that call it, so it is held to that event.
+ALLOWED_EVENTS = {"hook_logging.py": {"PreToolUse"}}
+for _event, _matcher, _script in REGISTRATIONS:
+    ALLOWED_EVENTS.setdefault(_script, set()).add(_event)
+
+_python_sites = 0
+for _path in sorted(Path(HOOKS).glob("*.py")):
+    _sites = hook_event_literals(_path.read_text(encoding="utf-8"), _path.name)
+    if not _sites:
+        continue
+    _allowed = ALLOWED_EVENTS.get(_path.name)
+    check(_allowed is not None,
+          "%s builds a hookSpecificOutput but is neither registered in "
+          "hooks.json nor declared a shared builder here" % _path.name)
+    for _line, _named in _sites:
+        _python_sites += 1
+        check(_named is not None,
+              "%s:%d builds a hookSpecificOutput with no hookEventName; the "
+              "response is rejected whole and none of it is applied"
+              % (_path.name, _line))
+        check(_named in _allowed,
+              "%s:%d names hookEventName=%r, but hooks.json registers it on %s"
+              % (_path.name, _line, _named, sorted(_allowed)))
+
+# The one guard written in bash has no AST to walk. Each of its responses is a
+# single-line printf format string, which makes a per-line check exact.
+_shell_allowed = ALLOWED_EVENTS["container_first.sh"]
+_shell_sites = 0
+for _num, _text in enumerate(
+        Path(HOOKS, "container_first.sh").read_text(
+            encoding="utf-8").splitlines(), 1):
+    if "hookSpecificOutput" not in _text:
+        continue
+    _shell_sites += 1
+    check(any('"hookEventName":"%s"' % _ev in _text for _ev in _shell_allowed),
+          "container_first.sh:%d emits a hookSpecificOutput without a "
+          "hookEventName in %s" % (_num, sorted(_shell_allowed)))
+
+# A walk that stops finding the literals proves nothing, and would go on
+# passing forever. Both counts are floors, not equalities: a new guard may add
+# sites, but losing the ones there are now means the check has gone blind.
+check(_python_sites >= 10,
+      "only %d python hookSpecificOutput literals found; the walk has stopped "
+      "seeing them" % _python_sites)
+check(_shell_sites >= 5,
+      "only %d shell hookSpecificOutput sites found; the scan has stopped "
+      "seeing them" % _shell_sites)
+print("PASS: %d python + %d shell hookSpecificOutput sites carry a "
+      "hookEventName their registration allows" % (_python_sites, _shell_sites))
 
 
 # ---------------------------------------------------------------------------

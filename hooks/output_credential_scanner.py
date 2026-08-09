@@ -166,7 +166,23 @@ def scan_output(text: str, command: str,
             extra={"intentional_search": intentional_search},
         )
         return {
-            "hookSpecificOutput": {"updatedToolOutput": redacted_text},
+            # ``hookSpecificOutput`` is a union discriminated on
+            # ``hookEventName``, and the discriminant is REQUIRED. Omitting it
+            # matched no member, so Claude Code rejected the whole response
+            # (``hookSpecificOutput is missing required field "hookEventName"``,
+            # verbatim in the 2.1.222 binary) and returned before the branch
+            # that applies the JSON. This guard therefore failed *open* in the
+            # one case it exists for: ``updatedToolOutput`` was never applied,
+            # the systemMessage was dropped with it, and the unredacted
+            # credential reached the transcript -- while the ``redact`` record
+            # deferred above, which fires first, said it had not. Only a
+            # high-confidence live credential reaches here, so every occurrence
+            # was a real secret. The hook is registered on PostToolUse for both
+            # Bash and Read, so one literal is correct on both paths.
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "updatedToolOutput": redacted_text,
+            },
             "systemMessage": msg,
         }
 
