@@ -101,7 +101,7 @@ Triggered by: `git config core.hooksPath .githooks`
 
 ### The twelve patterns
 
-Twelve patterns, eleven of which **ask**, one of which **denies**.
+Twelve patterns, ten of which **ask**, two of which **deny**.
 
 | Pattern | Rung | Catches |
 |---|---|---|

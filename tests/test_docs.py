@@ -313,17 +313,43 @@ threat_model = read("docs/threat-model.md")
 for name in git_guard.GIT_PATTERNS:
     check("`%s`" % name in threat_model,
           "threat-model.md documents the %s pattern" % name)
-documented = set(re.findall(r"^\| `(git_[a-z_]+|recursive_\w+|submodule_\w+)` \|",
-                            threat_model, re.MULTILINE))
+# Scoped to the table's own section and matching any backticked name, because
+# an alternation spelled `git_*|recursive_*|submodule_*` silently skipped
+# `unhardened_clone` -- so the row that denies was the one row never checked.
+_table = threat_model.split("### The twelve patterns", 1)[-1].split("\n## ", 1)[0]
+rungs = dict(re.findall(r"^\| `([a-z][a-z_]+)` \| (\S+) \|", _table, re.MULTILINE))
+documented = set(rungs)
+check(documented == set(git_guard.GIT_PATTERNS),
+      "every shipped git pattern is a row in the table, and no row is stale")
 for stale in sorted(documented - set(git_guard.GIT_PATTERNS)):
     check(False, "threat-model.md documents %s, which the guard no longer ships" % stale)
 
 count = len(git_guard.GIT_PATTERNS)
-denies = len(git_guard.HARD_DENY_PATTERNS)
 check("Twelve patterns" in threat_model and count == 12,
       "threat-model.md's pattern count matches the guard (%d)" % count)
-check(denies == 1 and "one of which **denies**" in threat_model,
-      "and its deny count matches (%d)" % denies)
+
+# The prose above the table and the table itself are two claims about the same
+# thing, so they are checked against each other rather than against a literal.
+# Both are then checked against the guard's TWO deny mechanisms: membership in
+# HARD_DENY_PATTERNS, and the explicit `pattern_name == ...` denies in `assess`
+# that git_guard.py:233 exists to warn about. Counting only the frozenset is how
+# this gate came to certify "one of which denies" while the table said two.
+doc_denies = {n for n, rung in rungs.items() if "deny" in rung}
+guard_source = read("hooks/git_guard.py")
+special = set(re.findall(r'pattern_name == "(\w+)":[\s\S]{0,400}?return \("deny"',
+                         guard_source))
+guard_denies = set(git_guard.HARD_DENY_PATTERNS) | special
+check(doc_denies == guard_denies,
+      "the table's deny rows match the guard's deny mechanisms (%s)"
+      % ", ".join(sorted(guard_denies)))
+check(len(special) > 0,
+      "assess's explicit denies are discoverable, not just the frozenset")
+NUMBER = ("zero one two three four five six seven eight nine ten eleven "
+          "twelve").split()
+check("%s of which **den" % NUMBER[len(doc_denies)] in threat_model,
+      "and the prose spells that deny count (%d)" % len(doc_denies))
+check("%s of which **ask" % NUMBER[count - len(doc_denies)] in threat_model,
+      "and the prose spells the ask count (%d)" % (count - len(doc_denies)))
 
 # Both risk and alternative text exist for every pattern: format_alert falls back
 # to a generic string, which is how a hard deny once printed "Potential
