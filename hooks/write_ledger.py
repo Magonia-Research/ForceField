@@ -24,18 +24,16 @@ write to a regular file opened ``O_APPEND`` is atomic against concurrent
 writers, so there is no critical section here to contend for and nothing to lose
 an update to. Bounds are applied when the file is *read* instead.
 
-**Every line carries an HMAC, and it is domain-separated from ``memo.py``'s.**
-The ledger decides whether a write is attributable and whether an earlier block
-correlates, so a forged line suppresses an ``ask`` — the same privilege gain a
-forged memo gives, and it gets the same protection. It reuses ``memo.key``
-rather than introducing a second key to protect, but ``memo.py`` signs with no
-domain prefix, so without ``_MAC_DOMAIN`` here a genuinely-signed memo could be
-replayed as a ledger line. The MAC also binds the session id, so a line cannot
-be moved between sessions.
+**Every line carries an HMAC, and it is domain-separated.** The ledger decides
+whether a write is attributable and whether an earlier block correlates, so a
+forged line suppresses an ``ask``. It reuses ``secure_store``'s key rather than
+introducing a second key to protect, and ``_MAC_DOMAIN`` keeps this signature
+space disjoint from every other user of that key. The MAC also binds the session
+id, so a line cannot be moved between sessions.
 
-The MAC raises the bar to same-user, exactly as the memo store's does. Anything
-running as this user can read ``memo.key``. It stops a hand-written line, not a
-determined local process running as you.
+The MAC raises the bar to same-user. Anything running as this user can read the
+key. It stops a hand-written line, not a determined local process running as
+you.
 
 Fail-open in every direction. An unreadable, corrupt or unverifiable ledger
 yields "nothing recorded", which costs a missed correlation or a spurious
@@ -59,7 +57,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).parent))
 from hook_event import read_regular_tail  # noqa: E402
 
-# Distinct from anything ``memo.py`` signs. See the module docstring.
+# Distinct from anything else signed with this key. See the module docstring.
 _MAC_DOMAIN = b"forcefield-ledger-v1\0"
 
 # Bounds. The measured bypass pairs all fell within 10 records of each other and
@@ -94,7 +92,7 @@ def state_dir() -> Path:
     file in a 0755 directory that no guard covered, so a constrained subagent
     could zero its own budget with a shell redirect and leave no record of it.
     Under ``~/.claude/forcefield/`` everything here inherits
-    ``filesystem_guard``'s ``forcefield_memos`` config-sink coverage instead: a
+    ``filesystem_guard``'s ``forcefield_state`` config-sink coverage instead: a
     raw shell write prompts, and so does a write through Write/Edit.
 
     That does not make this state tamper-proof — anything running as this user
@@ -136,18 +134,19 @@ def ledger_path(session_id: str | None) -> Path | None:
 
 
 def _key() -> bytes | None:
-    """The HMAC key, shared with the memo store.
+    """The HMAC key, shared with the other signed state under ``$HOME``.
 
-    ``memo`` is imported here rather than at module scope so that importing this
-    module costs nothing on a path that never touches the ledger, and so that
-    ``agent_guard`` importing ``state_dir`` does not drag the memo store in
-    behind it. None on any failure, which makes every line fail verification —
-    the safe direction, since an unverifiable ledger records nothing.
+    ``secure_store`` is imported here rather than at module scope so that
+    importing this module costs nothing on a path that never touches the ledger,
+    and so that ``agent_guard`` importing ``state_dir`` does not drag the key
+    handling in behind it. None on any failure, which makes every line fail
+    verification — the safe direction, since an unverifiable ledger records
+    nothing.
     """
     try:
-        from memo import _store_key  # noqa: PLC0415
+        from secure_store import store_key  # noqa: PLC0415
 
-        return _store_key()
+        return store_key()
     except Exception:  # noqa: BLE001 - an unusable key is "no ledger", not a crash
         return None
 
@@ -181,7 +180,7 @@ def _open_append(path: Path) -> int:
 
     ``O_NONBLOCK`` plus the ``S_ISREG`` check on the *descriptor* is the pair
     every other opener in this codebase carries, for the reason measured in
-    ``memo._open_private``: the state directory is under ``$HOME``, any same-uid
+    ``secure_store.open_private``: the state directory is under ``$HOME``, any same-uid
     process can replace a path in it, and a ``mkfifo`` at this name turns a
     0.04 s hook into a 5 s timeout kill with no verdict delivered. Checking the
     descriptor rather than the path is what makes it not a race.
@@ -283,7 +282,7 @@ def record_self(session_id: str | None, path: str) -> bool:
     The suppression this feeds is deliberately attribution-based rather than
     path-based. Excluding the state directory by path would also blind the guard
     to an agent editing the spawn counters, which is the specific thing the
-    ``forcefield_memos`` sink exists to catch.
+    ``forcefield_state`` sink exists to catch.
     """
     return _append(session_id, {"kind": _KIND_SELF, "path": path,
                                 "tool": "forcefield"})

@@ -63,12 +63,11 @@ _NEVER_SUPPRESSIBLE: dict[str, frozenset[str] | None] = {
     }),
     # ForceField's own control surface, plus the OS-level persistence sinks. A
     # write to any of these edits what the guards will do next, so allowing one
-    # to be suppressed — or remembered via /forcefield:remember, which defers to
-    # this table — lets a single approval disarm the tool permanently. The memo
-    # path made that concrete: `forcefield_memos` is a write to ForceField's own
-    # stored decisions, and it was memoizable.
+    # to be suppressed lets a single approval disarm the tool permanently.
+    # `forcefield_state` is the concrete case: a write to ForceField's own key
+    # and counters, which is a write to whether any later finding is believed.
     "filesystem_guard": frozenset({
-        "forcefield_memos",
+        "forcefield_state",
         "forcefield_config",
         "forcefield_plugin",
         "hook_allowlist",

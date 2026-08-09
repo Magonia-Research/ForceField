@@ -121,7 +121,7 @@ _LEVEL_FLOOR = {"debug": 5, "info": 9, "warn": 13, "error": 17}
 # level can drop a deny") rested on arithmetic that happened to hold.
 _UNSUPPRESSIBLE_DECISIONS = frozenset({"deny", "block"})
 _UNSUPPRESSIBLE_CLASSES = frozenset({"lifecycle", "permission"})
-_UNSUPPRESSIBLE_GUARDS = frozenset({"memo", "inspect_remote"})
+_UNSUPPRESSIBLE_GUARDS = frozenset({"secure_store", "inspect_remote"})
 
 # OCSF Application Lifecycle (class_uid 6002) activity ids, read from
 # schema.ocsf.io/1.5.0/classes/application_lifecycle rather than recalled:
@@ -649,8 +649,7 @@ def build_event(
     # reader could not distinguish "not downgraded" from "this build has no such
     # field" — which is also why `forcefield.config_downgraded` stays
     # conditional: absence is no longer ambiguous. Do NOT derive "downgraded" as
-    # natural != decision; the memo path writes natural "ask" with decision
-    # "allow" and that is not a config downgrade.
+    # natural != decision; a clamp is not the only thing that can move a rung.
     attributes["forcefield.natural"] = natural if natural is not None else decision
     attributes.update(_optional_attributes(
         pattern_matched=pattern_matched,
@@ -789,8 +788,6 @@ def _is_unsuppressible(
     if extra:
         if extra.get("config_downgraded"):
             return True
-        if extra.get("memo_hit"):
-            return True
     return False
 
 
@@ -910,24 +907,6 @@ def _build_rotation_record(rotated_to: str, rotated_bytes: int) -> dict[str, Any
 
 
 log_sinks.set_record_builder(_build_rotation_record)
-
-
-def _memo_hit(
-    guard_name: str, pattern_matched: str | None, subject: str | None,
-) -> dict[str, Any] | None:
-    """A previously remembered approval for this exact ask, or None.
-
-    Local import so ``memo`` can reach back into the guards' lock lists without a
-    cycle. Any failure falls through to prompting, which is the safe direction.
-    """
-    if not subject:
-        return None
-    try:
-        from memo import find_memo
-
-        return find_memo(guard_name, pattern_matched, subject)
-    except Exception:  # noqa: BLE001 - never let a memo lookup block a tool call
-        return None
 
 
 def defer_log(*args: Any, **kwargs: Any) -> None:
@@ -1131,31 +1110,9 @@ def clamp_and_emit(
     caller writes the returned dict (or ``{}`` when None) to stdout. Shared by the
     dispatcher and every standalone PreToolUse guard so the behavior is identical.
 
-    An ``ask`` the user explicitly chose to remember (``/forcefield:remember``) is
-    waved through here, before the config clamp — Claude Code returns a hook's
-    ask as the final permission decision without consulting ``permissions.allow``,
-    so this is the only layer that can stop a repeat prompt. Only ``ask`` is
-    memoizable; a ``deny`` never is.
-
     ``reason`` is credential-scrubbed before either channel is built — see
     ``_scrub_reason`` for why that belongs here rather than in each guard.
     """
-    if natural_decision == "ask":
-        memo = _memo_hit(guard_name, pattern_matched, command or file_path)
-        if memo is not None:
-            defer_log(
-                guard_name, "allow",
-                pattern_matched=pattern_matched, command=command,
-                file_path=file_path, context=context,
-                extra={
-                    "memo_hit": True,
-                    "memo_key": memo.get("key", "")[:12],
-                    "memo_uses": memo.get("uses"),
-                },
-                natural="ask",
-            )
-            return None
-
     decision = clamp_decision(
         guard_name, natural_decision,
         pattern_matched=pattern_matched, command=command,

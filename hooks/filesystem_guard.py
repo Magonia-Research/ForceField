@@ -89,15 +89,17 @@ _CONFIG_SINK_SOURCES: dict[str, str] = {
     "claude_settings": r"/\.claude/settings(?:\.local)?\.json$",
     "hook_allowlist": r"/\.claude/hook-allowlist\.json$",
     "forcefield_config": r"/\.claude/forcefield\.json$",
-    # ForceField's own runtime state. Remembered approvals (memos.json) turn a
-    # guard's ask into an allow; the spawn counters under state/ are what the
-    # agent rate limit is enforced from — a subagent that can zero its own budget
-    # does not have one; and sigma/ holds the compiled detection rules plus the
-    # venv python that sigma_update.sh executes at every SessionStart, which is
-    # the one entry here that is outright code execution. Covering the whole
-    # directory rather than the files known at the time is what made sigma/
-    # protected the day it was added, with no edit to this list.
-    "forcefield_memos": r"/\.claude/forcefield/",
+    # ForceField's own runtime state. `store.key` is the HMAC key every signed
+    # record rests on, so replacing it forges them all; the spawn counters under
+    # state/ are what the agent rate limit is enforced from — a subagent that can
+    # zero its own budget does not have one; and sigma/ holds the compiled
+    # detection rules plus the venv python that sigma_update.sh executes at every
+    # SessionStart, which is the one entry here that is outright code execution.
+    # Covering the whole directory rather than the files known at the time is what
+    # made sigma/ protected the day it was added, with no edit to this list — and
+    # what kept this correct when the store it was originally named for was
+    # removed.
+    "forcefield_state": r"/\.claude/forcefield/",
     "mcp_config": r"/\.mcp\.json$",
 }
 CONFIG_SINK_PATTERNS: dict[str, re.Pattern[str]] = {
@@ -107,8 +109,8 @@ CONFIG_SINK_PATTERNS: dict[str, re.Pattern[str]] = {
 # The same sinks, matched in a *Bash command string* rather than a canonical
 # path. This hook registers only for Write/Edit/MultiEdit/NotebookEdit/Read, so
 # every sink above was reachable from the shell with no guard at all:
-# ``echo '{}' > ~/.claude/forcefield/memos.json`` self-granted a remembered
-# approval, and a write to ``~/.claude/forcefield.json`` sets the *trusted*
+# ``echo '{}' > ~/.claude/forcefield/store.key`` replaced the key every signed
+# record is verified against, and a write to ``~/.claude/forcefield.json`` sets the *trusted*
 # config tier, which may loosen any guard to allow/off. Consumed by
 # ``security_dispatcher`` on the Bash path.
 #
@@ -120,7 +122,7 @@ CONFIG_SINK_PATTERNS: dict[str, re.Pattern[str]] = {
 # named here rather than inherited because ``check_bash_config_write`` reports
 # the FIRST sink that matches and one command can name two.
 _BASH_SINK_ORDER = (
-    "forcefield_config", "forcefield_memos", "hook_allowlist",
+    "forcefield_config", "forcefield_state", "hook_allowlist",
     "claude_settings", "mcp_config",
 )
 _BASH_SINK_SOURCES: dict[str, str] = {
@@ -147,9 +149,9 @@ def check_bash_config_write(command: str) -> tuple[str, str] | None:
     """Return (sink_name, matched_text) for a shell write to ForceField's own
     control surface, or None.
 
-    Never a hard deny — a legitimate ``/forcefield:remember`` run and a hostile
-    ``echo >`` are the same syscall, so the user is the only one who can tell
-    them apart.
+    Never a hard deny — a legitimate write to ForceField's own state and a
+    hostile ``echo >`` are the same syscall, so the user is the only one who can
+    tell them apart.
     """
     if not command or not _BASH_WRITE_VERB.search(command):
         return None
@@ -202,9 +204,9 @@ PATTERN_RISKS = {
     "claude_settings": "Writing Claude Code settings can disable security hooks",
     "hook_allowlist": "Writing hook-allowlist.json can suppress security guards",
     "forcefield_config": "Writing forcefield.json can loosen or disable guards",
-    "forcefield_memos": (
-        "Writing ForceField state can grant a remembered approval, reset a "
-        "subagent's spawn budget, or replace the sigma rules and the venv "
+    "forcefield_state": (
+        "Writing ForceField state can forge the key its signed records rest on, "
+        "reset a subagent's spawn budget, or replace the sigma rules and the venv "
         "python run at every session start"
     ),
     "mcp_config": "Writing .mcp.json registers MCP server commands Claude Code can spawn",

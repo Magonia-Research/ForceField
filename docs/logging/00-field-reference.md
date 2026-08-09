@@ -74,7 +74,7 @@ plausible one. `TraceId` is the `session_id` with its hyphens removed. `SpanId` 
 | Key | Value |
 |---|---|
 | `forcefield.record_class` | `finding`, `lifecycle` or `permission`. **Read this first.** On a non-`finding` record, `forcefield.decision` is the rung the record was written at, not a claim that ForceField decided anything. |
-| `forcefield.natural` | The decision the guard *wanted*, before any config clamp or remembered approval. Present even when it equals `forcefield.decision`, so "not downgraded" is distinguishable from "this build has no such field". |
+| `forcefield.natural` | The decision the guard *wanted*, before any config clamp. Present even when it equals `forcefield.decision`, so "not downgraded" is distinguishable from "this build has no such field". |
 | `forcefield.guard` | Guard name, and the primary pivot field. |
 | `forcefield.decision` | The decision as enforced, after the config clamp. |
 
@@ -84,7 +84,7 @@ plausible one. `TraceId` is the `session_id` with its hyphens removed. `SpanId` 
 |---|---|
 | `forcefield.pattern` | Almost every gating guard. Guard-specific vocabulary: a pattern name (`nc_connect`), a namespaced one (`output_credential:aws_access_key`), or a SigmaHQ rule UUID. |
 | `command.line` | Bash-facing guards. **Also reused for non-command strings**: `filesystem_guard` passes the matched path here and `webfetch_guard` passes the URL. `security_dispatcher` writes `<uninspectable>` when stdin was oversized or unparseable. |
-| `file.path` | `credential_guard`, `injection_defense`, `memo`. |
+| `file.path` | `credential_guard`, `injection_defense`, `secure_store`. |
 | `session.id` | Every guard. The dashed UUID; `TraceId` is the same value without hyphens. |
 | `tool.call.id` | The `tool_use_id` from the event. `SpanId` is its hash. |
 | `prompt.id` | Where the event type carries one. |
@@ -109,8 +109,6 @@ plausible one. `TraceId` is the `session_id` with its hyphens removed. `SpanId` 
 | `tool.name` | `mcp_guard`, `agent_output_guard`, `filesystem_guard` | The tool being gated. |
 | `forcefield.suppressed` | most gating guards | A pattern matched and `.claude/hook-allowlist.json` waved it through. Logged decision is `allow`. **A detection that did not enforce.** |
 | `forcefield.config_downgraded` | `clamp_and_emit` | `true` alongside `forcefield.natural`. |
-| `forcefield.memo_hit` | `clamp_and_emit` | The user had run `/forcefield:remember` for this exact command, so no prompt was shown. **Also a detection that did not enforce**, scoped to one command. |
-| `forcefield.memo_key`, `forcefield.memo_uses` | `clamp_and_emit` | Memo id prefix, and how often it has fired. A count climbing fast means one approval is being reused heavily. |
 | `forcefield.network_capable` | `mcp_guard` | Whether that MCP tool can reach the network. |
 | `forcefield.intentional_search` | `output_credential_scanner` | The user's own command was searching for secrets, so the hit is expected. |
 | `forcefield.subagent_type`, `forcefield.mode` | `agent_guard` | Requested subagent type and permission mode. |
@@ -405,7 +403,7 @@ jq -c 'select(.SpanId == "f8eaf4160673c5ca")' "$LOG"
 # Detections that did not enforce
 jq -c 'select(.Attributes."forcefield.config_downgraded" == true
               or .Attributes."forcefield.suppressed" == true
-              or .Attributes."forcefield.memo_hit" == true)' "$LOG"
+              )' "$LOG"
 
 # What a guard detected versus what it enforced
 jq -r 'select(.Attributes."forcefield.natural" != .Attributes."forcefield.decision")
@@ -421,9 +419,7 @@ fix.
 **Nothing records whether an `ask` was approved.** No Claude Code hook event carries the
 permission-dialog answer. `PermissionRequest` fires before the dialog, and `PermissionDenied`
 fires for auto-mode classifier denials rather than for a manual deny or a hook block. Do not
-build a detection on the answer to a prompt: the log holds the prompt only. The one adjacent
-signal is `forcefield.memo_hit`, which means the user had previously approved that exact command
-and chose to remember it.
+build a detection on the answer to a prompt: the log holds the prompt only.
 
 **Every sink fails silently.** A record that cannot be written is lost, and the call proceeds.
 The fact that a sink was unavailable is reported once, on `session.start`, in
@@ -432,8 +428,8 @@ The fact that a sink was unavailable is reported once, on `session.start`, in
 **A journald refusal is not counted**, while a `/dev/log` refusal is. See the asymmetry above.
 
 **A switched-off guard reports below `allow`.** No severity-based alert will surface it. The same
-holds for a suppression and a memo hit, which log as `allow`. Query
-`forcefield.decision == "off"`, `forcefield.suppressed` and `forcefield.memo_hit` by name.
+holds for a suppression, which logs as `allow`. Query
+`forcefield.decision == "off"` and `forcefield.suppressed` by name.
 
 **Fragmented native sinks defeat substring search.** 1.7% of offsets straddle a boundary. Use the
 file sink for content search.

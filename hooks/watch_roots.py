@@ -28,7 +28,7 @@ record. The four files that matter there are named individually instead.
 1,008 are the Sigma venv. A ``sigma_update.sh`` run therefore produces a burst,
 which is exactly what the self-write suppression in ``file_watch_guard`` absorbs.
 Watching the parent rather than listing its files is still correct, because a
-``memos.json`` that does not exist yet is the thing worth catching.
+``store.key`` replaced under it is the thing worth catching.
 
 Stdlib only, and imports nothing from ForceField: this sits at the same level as
 ``patterns.py`` so that both ``session_baseline`` (which emits the set) and

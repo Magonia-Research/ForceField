@@ -293,8 +293,8 @@ Triggered by: `git submodule update --init --recursive`
 
 `forcefield.natural` is `warn` here, not `ask`. Evidence grading happens *inside* the guard, so
 `warn` is the decision it arrived at and wanted; `forcefield.natural` records what a config clamp
-or a remembered approval would have overridden, which is a different question. Compare the record
-above, where the same field reads `ask`.
+would have overridden, which is a different question. Compare the record above, where the same
+field reads `ask`.
 
 **The two clone-shaped patterns no longer reach this branch.** `recursive_submodule_clone` and a
 bare clone both carry `unhardened_clone` underneath them, which the patch does not close, so on a
@@ -1075,9 +1075,9 @@ fabricate a stricter one, so the zero-false-positive guarantee on the deny tier 
 configuration. A project-level config file, which a cloned repo can ship, can soften a blocking
 guard only as far as `ask`. See [configuration](configuration.md).
 
-**A suppression and a memo are detections that did not enforce.** Both are logged. Query
-`forcefield.suppressed`, `forcefield.memo_hit` and `forcefield.config_downgraded` by name. A
-switched-off guard reports *below* `allow`, so no severity-based alert will surface it. See
+**A suppression is a detection that did not enforce.** It is logged. Query
+`forcefield.suppressed` and `forcefield.config_downgraded` by name. A switched-off guard reports
+*below* `allow`, so no severity-based alert will surface it. See
 [known gaps](logging/00-field-reference.md#known-gaps).
 
 **Behavioral rules are not enforced.** `/forcefield:full-power-to-shields` writes rules into a project's

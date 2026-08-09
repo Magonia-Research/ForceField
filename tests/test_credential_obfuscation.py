@@ -2,7 +2,7 @@
 """Credential detection against shell-level obfuscation.
 
 `patterns.redact_secrets` masks credentials out of every log record and is what
-`memo.remember` consults before writing a command to disk for the life of a TTL.
+`redact_secrets` masks before a command reaches any log sink.
 Both used to miss a token the shell reassembles at run time: the pattern engine
 sees `"sk-ant-"'api03-...'` and never the single word bash builds out of it.
 
@@ -123,7 +123,7 @@ print("PASS: every form bash assembles into a live token is detected (%d forms)"
 # --- 2. Forms that only LOOK like tokens must NOT be detected ---------------
 #
 # The false-positive half. bash transmits malformed text for every one of these,
-# so a match here would mask a log field and refuse a memo over nothing.
+# so a match here would mask a log field over nothing.
 
 INERT = (
     # Inside double quotes a backslash is literal before anything but $ ` " \ and
@@ -465,7 +465,7 @@ print("PASS: every detector prefix is masked by redact_secrets (%d shapes)" % _s
 # colon, the digits — everything except a credential.
 #
 # The price of a false positive here is not "one over-masked log field". It is
-# that `redact_secrets` is a decision input at `memo.py`, so `/forcefield:remember`
+# that `redact_secrets` shapes what every sink records, so a spurious match
 # refuses the command with a security claim that is false; and that an exfil
 # finding's record loses its destination while asserting
 # `forcefield.redacted_fields: ["command.line"]`.
@@ -594,7 +594,7 @@ _FLAG_NEGATIVE = (
     # read as `-p` on every program-anchored pattern.
     "redis-cli -h cache.internal -A something ping",
     # A header name is prose far more often than `sshpass` is. A placeholder is
-    # not a credential, and masking one had `/forcefield:remember` tell the user
+    # not a credential, and masking one had the log record tell the reader
     # to rotate a secret that does not exist.
     "sed -i 's/apikey: old/apikey: new/' config.yaml",
     "echo 'api-key: PLACEHOLDER' >> settings.yml",
@@ -605,7 +605,7 @@ _FLAG_NEGATIVE = (
     "echo 'Authorization: Basic REDACTED' > headers.txt",
     "echo 'apikey: xxxxxx' > headers.txt",
     # A `printf` conversion specification is not a value. `api_key_header`
-    # consumed `%s\n` as the header's secret, so `/forcefield:remember` refused
+    # consumed `%s\n` as the header's secret, so the record claimed
     # a command whose entire point is that the key comes from the environment.
     'printf \'x-api-key: %s\\n\' "$API_KEY" > headers.txt',
     'printf \'Authorization: Bearer %s\\n\' "$TOKEN" >> headers.txt',

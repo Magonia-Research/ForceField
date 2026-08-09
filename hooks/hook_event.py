@@ -185,8 +185,8 @@ def read_regular_text(path: Any, limit: int) -> str:
 def read_regular_tail(path: Any, limit: int) -> bytes:
     """LAST ``limit`` bytes of a regular file, or ``b""`` for anything else.
 
-    For the two append-only files a hook reads back — the security log's tail in
-    ``memo.last_ask`` and the per-session spawn tally in ``agent_guard`` — where
+    For the append-only files a hook reads back — the security log's tail and
+    the per-session spawn tally in ``agent_guard`` — where
     the interesting end is the newest one. The seek is on the same descriptor the
     ``S_ISREG`` check ran against, so there is no window in which the path could
     become something else between the two. The first line of the returned slice

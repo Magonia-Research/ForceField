@@ -246,7 +246,7 @@ Triggered by: `git config core.hooksPath .githooks`
 
 ### `git_guard` (graded on evidence)
 
-`PreToolUse[Bash], via security_dispatcher.py`. The clone-time CVE trigger surface, graded by `git_forensics`. This capture ran on a patched host, so the pattern's usual `ask` was graded down to `warn` before the record was built — which is why `forcefield.natural` reads `warn` too. That field records what a config clamp or a remembered approval would have overridden, not what the pattern would have said without evidence.
+`PreToolUse[Bash], via security_dispatcher.py`. The clone-time CVE trigger surface, graded by `git_forensics`. This capture ran on a patched host, so the pattern's usual `ask` was graded down to `warn` before the record was built — which is why `forcefield.natural` reads `warn` too. That field records what a config clamp would have overridden, not what the pattern would have said without evidence.
 
 Triggered by: `git submodule update --init --recursive`
 

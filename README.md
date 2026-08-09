@@ -139,10 +139,10 @@ Records are OpenTelemetry logs carrying an OCSF Detection Finding projection, wr
 available.
 
 ```bash
-# Detections that did not enforce: config downgraded, allowlisted, or remembered
+# Detections that did not enforce: config downgraded or allowlisted
 jq -c 'select(.Attributes."forcefield.config_downgraded" == true
               or .Attributes."forcefield.suppressed" == true
-              or .Attributes."forcefield.memo_hit" == true)' ~/.claude/hooks/security.log
+              )' ~/.claude/hooks/security.log
 
 # Which guard drives your friction, most frequent first
 jq -r '[.Attributes."forcefield.guard", .Attributes."forcefield.decision"] | @tsv' \
@@ -166,7 +166,7 @@ config unless it is running as root, and states the in-process ceiling that stan
 |---|---|
 | [Threat model](docs/threat-model.md) | Each attack class, the hooks that cover it, a real log record, and the primary disclosure it comes from |
 | [Hook reference](docs/hooks.md) | All 23 registrations, which 10 of Claude Code's 31 events they use and why not the other 21, the decision ladder, precedence, fail-open |
-| [Configuration](docs/configuration.md) | Trust levels, presets, per-rung mode maps, allowlists, remembered approvals, known friction |
+| [Configuration](docs/configuration.md) | Trust levels, presets, per-rung mode maps, allowlists, known friction |
 | [Architecture](docs/architecture.md) | Hook contract, Sigma pipeline, command normalization, file map, test suites |
 | [Log reference](docs/logging/) | Record schema, one measured record per hook, worked `jq` queries, known gaps |
 

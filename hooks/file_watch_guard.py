@@ -160,10 +160,8 @@ def main() -> None:
         # changed and no tool call passed a gate on the way.
         response["systemMessage"] = _warning(sink, canonical, file_event)
 
-    # `file_path`, not `command`: nothing here ran a command, and this guard
-    # takes no memo, which is the only reason the filesystem guard puts its path
-    # in the command field. `forcefield.pattern` already carries the sink name,
-    # so it is not repeated in `extra`.
+    # `file_path`, not `command`: nothing here ran a command. `forcefield.pattern`
+    # already carries the sink name, so it is not repeated in `extra`.
     defer_log(
         "file_watch_guard", "allow",
         pattern_matched=sink, file_path=canonical,

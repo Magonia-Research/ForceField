@@ -30,6 +30,7 @@ What the assertions are protecting
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import shutil
@@ -45,7 +46,7 @@ sys.path.insert(0, str(HOOKS))
 
 import git_forensics as gf  # noqa: E402
 import inspect_remote as ir  # noqa: E402
-import memo as _memo  # noqa: E402
+import secure_store as _store  # noqa: E402
 
 _count = 0
 
@@ -154,8 +155,7 @@ _REAL_RUN_GIT = ir._run_git
 _REAL_FETCH = gf.fetch_remote_gitmodules
 
 _STORE_HOME = Path(tempfile.mkdtemp(prefix="pc-inspect-store-"))
-_memo.STORE_DIR = _STORE_HOME
-_memo.STORE_PATH = _STORE_HOME / "memos.json"
+_store.STORE_DIR = _STORE_HOME
 
 
 # ---------------------------------------------------------------------------
@@ -515,9 +515,8 @@ print("PASS: the verdict store round-trips, binds to a commit, and rejects forge
 # ---------------------------------------------------------------------------
 
 check(ir._store_path().name == "inspections.json", "verdicts live in their own file")
-check(ir._store_path().parent == _memo.STORE_PATH.parent,
-      "beside the memo store, in the same 0700 directory")
-check(ir._store_path() != _memo.STORE_PATH, "and never in the memo store itself")
+check(ir._store_path().parent == _store.STORE_DIR,
+      "in the shared 0700 state directory")
 
 ir.record_verdict(CLEAN_A)
 mode = ir._store_path().stat().st_mode & 0o777
@@ -525,32 +524,33 @@ check(mode == 0o600, "the store is 0600, got %o" % mode)
 
 check(ir._signed_fields({}).startswith(ir._MAC_DOMAIN),
       "every inspection signature is domain-separated")
-check(not _memo._signed_fields({}).startswith(ir._MAC_DOMAIN),
-      "and a memo signature can never land in that space")
 
-# Concretely: a real, correctly-signed memo dropped into the verdict store.
-real_memo = _memo.remember("git_guard", "recursive_submodule_clone",
-                           "git clone --recursive " + URL)
-check(_memo.find_memo("git_guard", "recursive_submodule_clone",
-                      "git clone --recursive " + URL) is not None,
-      "the memo is genuine and works as a memo")
+# Concretely: the same key, the same payload, signed WITHOUT the domain prefix --
+# which is what every other user of this key would produce. It must not verify
+# here, or a signature made for one purpose could be replayed as a verdict.
+_key = _store.store_key()
+check(_key is not None, "the shared HMAC key is available")
+_forged = dict(key=slot, repo=CLEAN_A["repo"], commit=SHA_A,
+               verdict=ir.CLEAN, indicators=[], method="probe",
+               created_at=0, expires_at=None)
+_undomained = ir._signed_fields(_forged)[len(ir._MAC_DOMAIN):]
+_forged["mac"] = hmac.new(_key, _undomained, hashlib.sha256).hexdigest()
 store = ir._read_store()
-store["verdicts"][slot] = dict(real_memo, key=slot, repo=CLEAN_A["repo"], commit=SHA_A,
-                               verdict=ir.CLEAN, indicators=[])
+store["verdicts"][slot] = _forged
 ir._write_store(store)
 check(ir.find_verdict(URL, SHA_A) is None,
-      "a genuinely-signed MEMO does not verify as an inspection verdict")
-_memo.forget(real_memo["key"])
+      "a signature made outside this domain does not verify as a verdict")
 ir.forget("")
 
-# The module reaches into memo.py for the key handling and the store lock rather
-# than copying them. Pin that contract so a rename over there fails loudly here
-# instead of silently degrading signing to "" and every verdict to unrecorded.
-for name in ("_store_key", "_ensure_store_dir", "_open_private", "_store_lock",
-             "STORE_DIR", "_signed_fields"):
-    check(hasattr(_memo, name), "memo.py still provides %s" % name)
+# The module reaches into secure_store for the key handling and the store lock
+# rather than copying them. Pin that contract so a rename over there fails loudly
+# here instead of silently degrading signing to "" and every verdict to
+# unrecorded.
+for name in ("store_key", "ensure_store_dir", "open_private", "store_lock",
+             "STORE_DIR"):
+    check(hasattr(_store, name), "secure_store still provides %s" % name)
 
-print("PASS: separate store file, shared key, and the two signature spaces stay disjoint")
+print("PASS: separate store file, shared key, and the signature space stays disjoint")
 
 
 # ---------------------------------------------------------------------------

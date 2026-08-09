@@ -1515,10 +1515,10 @@ print("PASS: the lock excludes across processes on both branches, and every wait
 # =============================================================================
 #
 # The abstraction is only correct if each site's blocking behaviour survived it.
-# ``memo._store_lock(blocking=False)`` is the hook read path and must not wait;
-# ``blocking=True`` is the slash-command write path and must.
+# ``secure_store.store_lock(blocking=False)`` is the hook read path and must not
+# wait; ``blocking=True`` is the write path and must.
 
-import memo as _memo  # noqa: E402
+import secure_store as _store  # noqa: E402
 
 _LOCK_HOLDER = r"""
 import os, sys, time
@@ -1532,29 +1532,29 @@ time.sleep(float(sys.argv[2]))
 """ % {"hooks": str(HOOKS)}
 
 
-def hold_memo_lock(seconds):
-    """Another *process* holds the memo store lock. Returns the child."""
-    _memo._ensure_store_dir()
+def hold_store_lock(seconds):
+    """Another *process* holds the shared state lock. Returns the child."""
+    _store.ensure_store_dir()
     child = subprocess.Popen(
-        [sys.executable, "-c", _LOCK_HOLDER, str(_memo._lock_path()), str(seconds)],
+        [sys.executable, "-c", _LOCK_HOLDER, str(_store.lock_path()), str(seconds)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     check(child.stdout.readline().strip() == "held",
-          "the holder process reported taking the memo lock")
+          "the holder process reported taking the store lock")
     return child
 
 
-_child = hold_memo_lock(6.0)
+_child = hold_store_lock(6.0)
 try:
     _started = time.monotonic()
-    with _memo._store_lock(blocking=False) as _held:
+    with _store.store_lock(blocking=False) as _held:
         _elapsed = time.monotonic() - _started
         check(_held is None, "the non-blocking form yields None under contention")
     check(_elapsed < 1.0,
           "the non-blocking form returned in %.3fs, without waiting" % _elapsed)
 
     _started = time.monotonic()
-    with _memo._store_lock(blocking=True) as _held:
+    with _store.store_lock(blocking=True) as _held:
         _elapsed = time.monotonic() - _started
         check(_held is None,
               "the blocking form gives up rather than outlasting the hook budget")
@@ -1567,11 +1567,11 @@ finally:
 
 # Uncontended, both forms take the lock and hand back a usable handle.
 for _blocking in (True, False):
-    with _memo._store_lock(blocking=_blocking) as _held:
+    with _store.store_lock(blocking=_blocking) as _held:
         check(_held is not None,
               "an uncontended lock is taken (blocking=%s)" % _blocking)
 
-print("PASS: the memo read path still refuses to wait and the write path still "
+print("PASS: the store read path still refuses to wait and the write path still "
       "waits, now with a deadline")
 
 # The spawn budget: the same lost-update race the lock exists to prevent, over
@@ -1810,10 +1810,10 @@ print("PASS: the event is decoded as UTF-8 whatever the platform locale claims")
 #    made unguarded
 # =============================================================================
 
-_key = _memo._key_path()
+_key = _store.key_path()
 if _key.exists():
     _key.unlink()
-check(_memo._store_key() is not None, "a fresh memo key is created")
+check(_store.store_key() is not None, "a fresh state key is created")
 check(len(_key.read_bytes()) == 32,
       "the HMAC key is exactly 32 bytes -- a text-mode descriptor would expand "
       "the 0x0A bytes in it (got %d)" % len(_key.read_bytes()))
@@ -1838,8 +1838,8 @@ def _recording_open(path, flags, mode=0o777):
 _ls.file_dir().mkdir(parents=True, exist_ok=True)
 _had_o_binary = hasattr(os, "O_BINARY")
 _BINARY_SITES = (
-    ("memo._open_private",
-     lambda: os.close(_memo._open_private(_scratch_dir / "k",
+    ("secure_store.open_private",
+     lambda: os.close(_store.open_private(_scratch_dir / "k",
                                           os.O_WRONLY | os.O_CREAT))),
     ("agent_guard._bump_spawn_count",
      lambda: _ag._bump_spawn_count(_scratch_dir / "spawn.json", time.time())),
@@ -1870,12 +1870,12 @@ finally:
     if not _had_o_binary:
         del os.O_BINARY
 
-check(_memo._key_is_private(_key) is True, "the key is owner-only on this platform")
+check(_store.key_is_private(_key) is True, "the key is owner-only on this platform")
 _real_getuid = getattr(os, "getuid", None)
 try:
     if _real_getuid is not None:
         del os.getuid
-    check(_memo._key_is_private(_key) is False,
+    check(_store.key_is_private(_key) is False,
           "without os.getuid the key is reported unverified -- never an "
           "AttributeError, and never a silent unverified apply")
 finally:
@@ -2729,7 +2729,7 @@ print("PASS: the Event Log command construction and the sink self-description")
 # Three separate rounds each fixed the reads they had thought of and each left
 # more behind: `~/.claude/forcefield.json` and the compiled Sigma ruleset, then
 # `.claude-plugin/plugin.json` and `hooks/hooks.json`, then
-# `.claude/hook-allowlist.json`, `git_forensics._read_text`, `memo.last_ask`,
+# `.claude/hook-allowlist.json`, `git_forensics._read_text`,
 # `agent_guard._spawn_window_count` and `inspect_remote._read_store`. Measured,
 # one `mkfifo` per path: the plugin manifest killed 19 of 26 registrations and
 # turned `container_first.sh`'s exit-2 hard deny on `rm -rf /` into a SIGKILL;
@@ -2793,15 +2793,14 @@ check(not _UNGUARDED_READS,
 #
 # `_is_read_mode` inspects a `mode` STRING; `os.open` takes a flags INTEGER, so
 # every `os.open` in the tree was outside the gate's vocabulary rather than
-# passing it. That is where `memo._open_private` lived: the one `os.open` on the
-# hook path with neither `O_NONBLOCK` nor an `S_ISREG` check, reached from
-# `clamp_and_emit` -> `find_memo` -> `_touch` -> `_write_store` on every natural
-# `ask`. Measured with 4000 FIFOs pre-created at `memos.json.tmp.<pid>`:
-# `wall=0.044s rc=0` became `wall=9.005s rc=None` -- killed at the 5 s timeout
-# with no verdict and no record. Measured flags behaviour, both floors:
-# `O_RDWR|O_CREAT` on a FIFO returns in 0.000 s and `O_WRONLY|O_CREAT|O_TRUNC`
-# waits for a reader forever, so a census that only looked at ONE of the two
-# halves would have cleared `memos.lock` and missed `memos.json.tmp`.
+# passing it. That is where the store's private open lived: the one `os.open` on
+# the hook path with neither `O_NONBLOCK` nor an `S_ISREG` check. Measured with
+# 4000 FIFOs pre-created at the per-pid temp names: `wall=0.044s rc=0` became
+# `wall=9.005s rc=None` -- killed at the 5 s timeout with no verdict and no
+# record. Measured flags behaviour, both floors: `O_RDWR|O_CREAT` on a FIFO
+# returns in 0.000 s and `O_WRONLY|O_CREAT|O_TRUNC` waits for a reader forever,
+# so a census that only looked at ONE of the two halves would have cleared the
+# lock file and missed the temp file.
 #
 # Function-level granularity on purpose: both halves are properties of the
 # opening function, and all six sites in the tree write them together. `S_ISREG`
@@ -2886,43 +2885,43 @@ for _module in sorted(set(MODULES) - _NOT_ON_THE_HOOK_PATH):
     _OS_OPEN_SITES += sum(1 for n in ast.walk(_tree) if _is_os_open(n))
 check(_OS_OPEN_SITES >= 6,
       "the os.open census matches the sites it is meant to police (found %d, "
-      "expected at least the 6 in hook_event, config, memo, agent_guard and "
+      "expected at least the 6 in hook_event, config, secure_store, agent_guard "
+      "and "
       "log_sinks x2)" % _OS_OPEN_SITES)
 
-# And it is live: `memo._open_private` -- the site the census was written for --
-# really does refuse a FIFO rather than wait for a reader. Driven in a child
-# with a deadline, because the failure mode under test is a HANG: an in-process
-# assertion could not distinguish "refused" from "still waiting".
+# And it is live: `secure_store.open_private` -- the site the census was written
+# for -- really does refuse a FIFO rather than wait for a reader. Driven in a
+# child with a deadline, because the failure mode under test is a HANG: an
+# in-process assertion could not distinguish "refused" from "still waiting".
 if hasattr(os, "mkfifo"):
-    _memo_fifo_home = Path(tempfile.mkdtemp(prefix="forcefield-memo-fifo-"))
-    _memo_fifo = _memo_fifo_home / "memos.json.tmp.1"
-    os.mkfifo(str(_memo_fifo), 0o600)
-    _memo_probe = (
+    _store_fifo_home = Path(tempfile.mkdtemp(prefix="forcefield-store-fifo-"))
+    _store_fifo = _store_fifo_home / "store.json.tmp.1"
+    os.mkfifo(str(_store_fifo), 0o600)
+    _store_probe = (
         "import os, sys\n"
         "sys.path.insert(0, %r)\n"
-        "import memo\n"
+        "import secure_store\n"
         "try:\n"
-        "    fd = memo._open_private(__import__('pathlib').Path(%r),\n"
-        "                            os.O_WRONLY | os.O_CREAT | os.O_TRUNC)\n"
+        "    fd = secure_store.open_private(__import__('pathlib').Path(%r),\n"
+        "                                   os.O_WRONLY | os.O_CREAT | os.O_TRUNC)\n"
         "except OSError as exc:\n"
         "    print('REFUSED')\n"
         "else:\n"
         "    os.close(fd)\n"
         "    print('OPENED')\n"
-    ) % (str(HOOKS), str(_memo_fifo))
+    ) % (str(HOOKS), str(_store_fifo))
     try:
-        _memo_result = subprocess.run(
-            [sys.executable, "-c", _memo_probe],
+        _store_result = subprocess.run(
+            [sys.executable, "-c", _store_probe],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10,
         )
-        _memo_out = _memo_result.stdout.decode("utf-8", "replace").strip()
+        _store_out = _store_result.stdout.decode("utf-8", "replace").strip()
     except subprocess.TimeoutExpired:
-        _memo_out = "HUNG"
-    check(_memo_out.endswith("REFUSED"),
-          "memo._open_private refuses a FIFO at memos.json.tmp instead of "
-          "waiting for a reader that never comes -- this is the open reached "
-          "from clamp_and_emit on every natural ask, and a hang here is a "
-          "killed hook with its verdict discarded: got %r" % _memo_out)
+        _store_out = "HUNG"
+    check(_store_out.endswith("REFUSED"),
+          "secure_store.open_private refuses a FIFO instead of waiting for a "
+          "reader that never comes -- a hang here is a killed hook with its "
+          "verdict discarded: got %r" % _store_out)
 
 # The gate is live: the primitive it points at exists and really does refuse a
 # FIFO without waiting. A named pipe with no writer is the exact shape, and this

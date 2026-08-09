@@ -106,8 +106,8 @@ there is one ordering rather than two:
 | `error` | 17 | `deny`, `block` |
 
 No level can drop a record the suppression machinery depends on. A `deny` or `block`, a decision
-nobody modelled, any `lifecycle` or `permission` record, anything from `memo` or `inspect_remote`,
-anything whose *natural* decision was a deny, anything config downgraded, and any memo hit are all
+nobody modelled, any `lifecycle` or `permission` record, anything from `secure_store` or
+`inspect_remote`, anything whose *natural* decision was a deny, and anything config downgraded are all
 written at every level. That is a property of the record rather than a flag a call site has to
 remember. The old model's `force=True` was missed on exactly the path that needed it most, so a
 hard deny softened to `warn` by config vanished from the log entirely.
@@ -204,45 +204,10 @@ A suppression is a detection that did not enforce, and it is logged as one, so q
 `forcefield.suppressed`, not severity. See
 [known gaps](logging/00-field-reference.md#known-gaps).
 
-## Remembered approvals: `/forcefield:remember`
-
-Claude Code's own "don't ask again" does not work on a ForceField prompt. A PreToolUse hook's `ask`
-is returned as the final permission decision *without* `permissions.allow` ever being consulted, so
-adding an allow rule changes nothing. Nor can a hook see which button you pressed. ForceField
-therefore needs one explicit command afterwards.
-
-```bash
-/forcefield:remember              # remember the most recent ask
-/forcefield:remember list         # show what is remembered
-/forcefield:remember forget <key> # undo one
-```
-
-That exact command stops prompting. The mechanism is deliberately narrow:
-
-| | |
-|---|---|
-| Turns | `ask` → `allow` only; a hard `deny` is never memoizable |
-| Matches | one exact command (whitespace runs collapsed), no wildcards |
-| Scope | this project only; `--global` is opt-in |
-| Expiry | 30 days; `--days N`, or `--forever` if you insist |
-| Stored | `~/.claude/forcefield/memos.json`, mode `0600`, never in the repo |
-| Refused for | anything on `NEVER_ALLOWLIST` / `_NEVER_SUPPRESSIBLE` (credential reads, git RCE primitives, exfil relays), and any command containing a credential |
-| Logged | every hit writes an `allow` record with `forcefield.memo_hit` and `forcefield.natural: ask` |
-
-The store lives under `$HOME` for the same reason the tiered config does: `<cwd>/.claude/` is
-untrusted, and a memo file inside a repo would let that repo, or the agent, disarm the guard
-watching it. Writes to the store are themselves guarded (`filesystem_guard`, `forcefield_memos`) on
-both the file-editing tools and the Bash path, and each entry is HMAC-signed with a key in
-`~/.claude/forcefield/memo.key` (0600): an entry the `remember` command did not write is ignored.
-
-Prefer a config change when the noise is class-shaped rather than command-shaped. Two hundred
-remembered exceptions signals that a guard's `mode` or the `severity_floor` is the real fix.
-
 ## Known friction and how to loosen it
 
-Reach for the narrowest relief: remember one approved command (`/forcefield:remember`) → allowlist
-one pattern or path → soften one guard (`guards.<name>.mode`) → pick a preset → disable a guard for
-one project (home config only).
+Reach for the narrowest relief: allowlist one pattern or path → soften one guard
+(`guards.<name>.mode`) → pick a preset → disable a guard for one project (home config only).
 
 | Legitimate workflow that trips a guard | Guard | Level | Relief |
 |------|------|------|------|
@@ -254,7 +219,7 @@ one project (home config only).
 | Reading a project `.env` in dev | credential_access_guard | ask | Allowlist that path under `suppress_paths` |
 | Fake keys in fixtures / `.env.example` | credential_guard | ask | Placeholders are already skipped; else `suppress_paths` |
 | Editing `~/.zshrc` / `~/.gitconfig` | filesystem_guard | ask | Allowlist the path, or disable for that project |
-| Shell write to `~/.claude/forcefield.json`, `settings.json`, anything under `~/.claude/forcefield/` | filesystem_guard | ask | Intentional: these decide what the guards do next, and cannot be suppressed or remembered |
+| Shell write to `~/.claude/forcefield.json`, `settings.json`, anything under `~/.claude/forcefield/` | filesystem_guard | ask | Intentional: these decide what the guards do next, and cannot be suppressed |
 | Any `git clone` or `gh repo clone` | git_guard | ask | Clone with `git -c core.hooksPath=/dev/null clone --no-recurse-submodules <url>`, which the guard passes silently — the prompt names that command. It does not stop on a patched git, because neither setting is a patch for either CVE. Otherwise allowlist `unhardened_clone` for that repo. See [the clone redirect](threat-model.md#the-clone-redirect) |
 | Submodule init or a recursing pull in a trusted repo | git_guard | ask *(context only on a patched git)* | Update git first, which closes both CVEs and the prompt stops on its own. Otherwise allowlist `submodule_update` / `submodule_recurse_fetch` for that repo |
 | `git clone ext::…` | git_guard | **deny** | Not loosenable except by preset. The transport runs its URL as a shell command; see [the threat model](threat-model.md#the-twelve-patterns) |

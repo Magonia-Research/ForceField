@@ -41,11 +41,10 @@ jq -c 'select(.Attributes."forcefield.guard" == "session_baseline") | .Attribute
 - **Start with [known gaps](00-field-reference.md#known-gaps).** Nothing records whether an
   `ask` was approved. Every sink fails silently. Both matter more than any field name.
 - **Hunting for what a guard detected, not what it enforced?** Query `forcefield.natural`, not
-  `forcefield.decision`. The two differ whenever config downgraded a finding or a remembered
-  approval waved it through.
+  `forcefield.decision`. The two differ whenever config downgraded a finding.
 - **Looking for coverage that was switched off?** A disabled guard reports *below* `allow`, so no
   severity-based alert will surface it. Query `forcefield.decision == "off"`, plus
-  `forcefield.suppressed` and `forcefield.memo_hit`, by name.
+  `forcefield.suppressed`, by name.
 - **Forwarding to a SIEM?** What a sink receives follows from that sink's measured
   confidentiality, not from the platform. At `CONF_ADMIN`, the free-text floor, the record arrives
   whole with `command.line` and `file.path` included: that is the macOS unified log and journald.
@@ -63,10 +62,10 @@ jq -c 'select(.Attributes."forcefield.guard" == "session_baseline") | .Attribute
 # High-severity findings, by OCSF severity rather than a fragile text match
 jq -c 'select(.Attributes."ocsf.severity_id" >= 4)' ~/.claude/hooks/security.log
 
-# Detections that did not enforce: config downgraded, allowlisted, or remembered
+# Detections that did not enforce: config downgraded or allowlisted
 jq -c 'select(.Attributes."forcefield.config_downgraded" == true
               or .Attributes."forcefield.suppressed" == true
-              or .Attributes."forcefield.memo_hit" == true)' ~/.claude/hooks/security.log
+              )' ~/.claude/hooks/security.log
 
 # Which guard drives your friction, most frequent first
 jq -r '[.Attributes."forcefield.guard", .Attributes."forcefield.decision"] | @tsv' \

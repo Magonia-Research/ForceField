@@ -9,9 +9,9 @@ coverage. Three things here can be attacked, and each gets a test that tries:
    ledger line is public and derivable, and the file sits in ``$HOME`` where no
    Bash-path guard covers it, so "only we can write it" was never true. The MAC
    is the whole control.
-2. **The domain separation from ``memo.py``.** Both sign with ``memo.key``. If
-   the ledger accepted a memo's signature, a legitimately-signed memo could be
-   replayed as a ledger line.
+2. **The domain separation.** Several stores sign with the one shared key. If
+   the ledger accepted an undomained signature, a value signed for another
+   purpose could be replayed as a ledger line.
 3. **Self-write suppression.** It has to swallow ForceField's own state writes
    and *not* swallow an agent's write to the same directory. A rule that
    swallows both is indistinguishable from having no watch at all, and it would
@@ -110,14 +110,14 @@ if True:
     check(write_ledger.attribution(SESSION, target) == "gate",
           "a corrupt line does not destroy the entries around it")
 
-    # 2. Domain separation from the memo store: a value signed the way memo.py
-    # signs must not verify as a ledger line.
+    # 2. Domain separation: a value signed with the shared key but WITHOUT this
+    # ledger's domain prefix must not verify as a ledger line.
     import hashlib
     import hmac
 
-    import memo
+    import secure_store
 
-    key = memo._store_key()
+    key = secure_store.store_key()
     check(key is not None, "the shared HMAC key is available")
     replay = {"kind": "gate", "at": time.time(),
               "path": "/tmp/forcefield-ledger-probe/replay.sh", "tool": "Write"}
@@ -196,7 +196,7 @@ if True:
                 if r.get("Attributes", {}).get("forcefield.guard")
                 == "file_watch_guard"]
 
-    watched = os.path.join(str(home), ".claude", "forcefield", "memos.json")
+    watched = os.path.join(str(home), ".claude", "forcefield", "store.key")
     os.makedirs(os.path.dirname(watched), exist_ok=True)
 
     event = {

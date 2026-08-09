@@ -902,7 +902,7 @@ try:
               "nor a lifecycle record, which is the heartbeat")
         check(hl._should_record("warn", "exfil_guard", "finding", "deny", None),
               "nor a hard deny that config softened to a warn")
-        check(hl._should_record("allow", "memo", "finding", "allow", None),
+        check(hl._should_record("allow", "secure_store", "finding", "allow", None),
               "nor the suppression machinery's own record")
         # The control. Without it the six above would pass against a
         # `_should_record` that had simply stopped consulting the level at all.

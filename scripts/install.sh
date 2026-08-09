@@ -75,7 +75,7 @@ RULES_JSON="$SIGMA_DIR/rules.json"
 echo "=== ForceField — Post-Install Setup ==="
 echo ""
 
-# Owner-only, matching the memo store that shares this directory.
+# Owner-only, matching the signed state that shares this directory.
 mkdir -p "$SIGMA_DIR"
 chmod 700 "$STATE_DIR" "$SIGMA_DIR" 2>/dev/null || true
 

@@ -19,9 +19,10 @@ if [[ -f "$SIGMA_DIR/rules.json" ]]; then
   rm -f "$SIGMA_DIR/rules.json"
 fi
 
-# The parent directory also holds remembered approvals and the subagent spawn
-# counters, which are not this script's to delete. Only the sigma subdirectory
-# is, and only once it is empty.
+# The parent directory also holds the store key, inspection verdicts
+# (inspections.json) and per-session state (spawn counters, write ledger),
+# which are not this script's to delete. Only the sigma subdirectory is, and
+# only once it is empty.
 rmdir "$SIGMA_DIR" 2>/dev/null || true
 
 echo ""

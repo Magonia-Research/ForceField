@@ -15,9 +15,9 @@ context for Claude.
 
 **Decisions route through `clamp_and_emit`.** Every gating guard passes its decision to
 `hook_logging.clamp_and_emit`, which applies the tiered [config](configuration.md) ceiling before
-building the response and logging it, then checks for a remembered approval. It logs the *clamped*
-decision and adds `forcefield.natural` plus `forcefield.config_downgraded` when the two differ, so
-the log records what was detected as well as what was enforced. The clamp is downgrade-only.
+building the response and logging it. It logs the *clamped* decision and adds `forcefield.natural`
+plus `forcefield.config_downgraded` when the two differ, so the log records what was detected as
+well as what was enforced. The clamp is downgrade-only.
 
 **Fail-open is an invariant.** A crash, timeout or invalid output must never block the tool call. No
 exception may escape a guard. The 5s timeout is part of the same boundary: a hook killed mid-scan
@@ -118,14 +118,13 @@ hooks/watch_roots.py                 Concrete paths for the FileChanged watcher
 hooks/write_ledger.py                Per-session state: gated writes, self-writes, pending blocks
 hooks/hook_event.py                  Explicit stdin decode + correlation ids from the event
 hooks/portable_lock.py               Bounded-wait file lock (flock / msvcrt.locking)
+hooks/secure_store.py                Owner-only state dir, HMAC key and lock (shared)
 hooks/log_sinks.py                   Per-platform sinks, confidentiality, rotation
-hooks/hook_logging.py                OTel/OCSF logging + config clamp + memo check
+hooks/hook_logging.py                OTel/OCSF logging + config clamp
 hooks/config.py                      Tiered strictness config
 hooks/allowlist.py                   Per-project suppression
-hooks/memo.py                        Remembered approvals (ask -> allow) + CLI
 .claude-plugin/plugin.json           Plugin metadata
 .claude-plugin/marketplace.json      Marketplace manifest
-commands/remember.md                 /forcefield:remember command
 commands/inspect.md                  /forcefield:inspect command
 skills/full-power-to-shields/SKILL.md /forcefield:full-power-to-shields skill
 scripts/install.sh                   Setup (venv + sigma compilation)
@@ -157,7 +156,6 @@ for t in tests/test_*.py; do python3 "$t" || break; done
 | `test_false_positives.py` | Benign corpus: `deny` must never fire on ordinary work |
 | `test_warn_rung.py` | The `warn` rung across all 12 config-governed guards |
 | `test_reason_scrub.py` | A decision reason never carries a credential value |
-| `test_memo_lifecycle.py` | Memo lock contention, forced logging, lifecycle records |
 | `test_credential_obfuscation.py` | Credentials the shell reassembles from quoted fragments |
 | `test_git_forensics.py` | The git evidence layer: per-branch CVE version comparison, `.gitmodules` signatures, the repo audit, and the raw-fetch host allowlist |
 | `test_repo_audit.py` | The SessionStart audit: silence when clean, exploit signatures unsuppressible, fail-open on an unreadable repo |
@@ -166,8 +164,8 @@ for t in tests/test_*.py; do python3 "$t" || break; done
 | `test_portability.py` | Every hook imports with the POSIX-only modules blocked, the file lock holds across processes on both backends, the tree parses under the 3.9 grammar, and the Windows Event Log command is built without being run |
 | `test_log_sinks.py` | The logging subsystem under failure: every sink degrading, a hard deny surviving inside the hook timeout, the rollover under concurrent processes, every level, and the four record types this rework added |
 | `test_verdict_ordering.py` | Every `hooks.json` registration delivers its verdict before it does any logging, measured against a real stalled sink, and the two that cannot are bounded by the process logging budget |
-| `test_file_watch.py` | The write ledger's HMAC (forged, unsigned, relocated and memo-signed lines all rejected), self-write suppression in both directions, the watch-root correspondence gate, and the correlation target extractor |
-| `_isolated_home.py` | Helper: redirects `$HOME` so tests never touch the real log or memo store |
+| `test_file_watch.py` | The write ledger's HMAC (forged, unsigned, relocated and undomained lines all rejected), self-write suppression in both directions, the watch-root correspondence gate, and the correlation target extractor |
+| `_isolated_home.py` | Helper: redirects `$HOME` so tests never touch the real log or state store |
 | `_fake_msvcrt.py` | Helper: a documented-contract stand-in for `msvcrt`, so the Windows lock branch is exercised on POSIX |
 
 `test_sigma_engine.py` skips its match-expecting cases (and stays green) unless the rules have been

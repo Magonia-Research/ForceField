@@ -2,7 +2,7 @@
 """Divert ``$HOME`` to a throwaway directory. Import this BEFORE any hook module.
 
 ``hooks/log_sinks.py`` resolves the file sink's directory from ``Path.home()``
-on first use, and ``hooks/memo.py`` does the same for its store. A suite that
+on first use, and ``hooks/secure_store.py`` does the same for its state. A suite that
 imports a guard therefore appends fabricated attack records to the operator's
 real ``~/.claude/hooks/security.log``: in one measurement 794 of 1539 records
 were test fixtures, which was enough to invert the conclusions drawn from the
@@ -32,7 +32,7 @@ import tempfile
 # every suite still gets a complete record to assert against.
 os.environ["FORCEFIELD_LOG_SINKS"] = "none"
 
-_ALREADY_IMPORTED = [m for m in ("hook_logging", "memo", "log_sinks") if m in sys.modules]
+_ALREADY_IMPORTED = [m for m in ("hook_logging", "secure_store", "log_sinks") if m in sys.modules]
 if _ALREADY_IMPORTED:
     raise RuntimeError(
         "tests/_isolated_home.py imported too late: %s already resolved its "

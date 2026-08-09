@@ -60,7 +60,7 @@ from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).parent))
 import git_forensics as forensics  # noqa: E402
-import memo  # noqa: E402
+import secure_store  # noqa: E402
 from hook_event import read_regular_text  # noqa: E402
 
 # Not the hook path, so these are generous compared with FETCH_TIMEOUT_S. They
@@ -77,7 +77,7 @@ DEFAULT_TTL_DAYS = 30
 MAX_STORE_BYTES = 262_144
 MAX_VERDICTS = 500
 
-# Domain separator for the MAC. The key is shared with ``memo.py`` (see
+# Domain separator for the MAC. The key is shared with ``secure_store.py`` (see
 # ``_store_key``); this constant is what stops a signature minted for one store
 # from verifying in the other.
 _MAC_DOMAIN = b"forcefield-inspection-v1\0"
@@ -490,29 +490,24 @@ def inspect_and_record(url: str, ttl_days: int | None = DEFAULT_TTL_DAYS) -> dic
 # The verdict store
 # ---------------------------------------------------------------------------
 #
-# A separate file from memos.json, in the same 0700 directory, signed with the
-# same key under a different domain separator.
+# Its own file in the 0700 state directory, signed with the shared key under its
+# own domain separator.
 #
-# Separate because a memo and a verdict are different objects. A memo says "turn
-# this exact ask into an allow" and can only ever loosen; ``memo._signed_fields``
-# covers a fixed tuple with no slot for a commit, so a commit added to a memo
-# would sit outside the MAC — forgeable, which defeats the one property the
-# commit is there to provide. Widening that tuple instead would invalidate every
-# memo already in a user's store. And a verdict can be *negative*: "DO NOT CLONE
-# at this commit" has no representation in a store that only ever says allow.
+# Same key because ``secure_store.store_key`` is where the 0600-from-creation
+# open, the ownership and permission check, and the "key is no longer private,
+# distrust every signature" logging already live, and a second copy of that is a
+# second chance to get it wrong. ``_MAC_DOMAIN`` keeps this signature space
+# disjoint from every other user of that key, so no signature made elsewhere
+# verifies here and no verdict signature verifies there.
 #
-# Same key because ``memo._store_key`` is where the 0600-from-creation open, the
-# ownership and permission check, and the "key is no longer private, distrust
-# every signature" logging already live, and a second copy of that is a second
-# chance to get it wrong. ``_MAC_DOMAIN`` keeps the two signature spaces
-# disjoint: a memo's signed payload is a JSON object and can never start with
-# that prefix, so no memo signature verifies here and no verdict signature
-# verifies there.
+# A verdict can be *negative*: "DO NOT CLONE at this commit" is a thing this
+# store has to be able to say, which is why it is a store of verdicts rather
+# than a list of approvals.
 
 
 def _store_path() -> Path:
-    """Resolved at call time so redirecting ``memo.STORE_DIR`` moves this too."""
-    return memo.STORE_DIR / STORE_FILENAME
+    """Resolved at call time so redirecting ``secure_store.STORE_DIR`` moves this too."""
+    return secure_store.STORE_DIR / STORE_FILENAME
 
 
 def verdict_key(repo: str, commit: str) -> str:
@@ -532,7 +527,7 @@ def _signed_fields(record: dict[str, Any]) -> bytes:
 
 
 def _sign(record: dict[str, Any]) -> str:
-    key = memo._store_key()
+    key = secure_store.store_key()
     if key is None:
         return ""
     return hmac.new(key, _signed_fields(record), hashlib.sha256).hexdigest()
@@ -541,7 +536,7 @@ def _sign(record: dict[str, Any]) -> str:
 def _verify(record: dict[str, Any], slot: str) -> bool:
     """Whether this record was written here and belongs in ``slot``.
 
-    Both halves, for the reason ``memo._verify`` documents: a MAC over a
+    Both halves, for the reason ``_verify`` documents: a MAC over a
     record's own fields proves only that ForceField signed *some* verdict, never
     that it signed *this* lookup. A genuinely-signed clean verdict re-filed
     under another repository's slot would otherwise clear that repository.
@@ -581,10 +576,10 @@ def _read_store() -> dict[str, Any]:
 
 
 def _write_store(data: dict[str, Any]) -> None:
-    memo._ensure_store_dir()
+    secure_store.ensure_store_dir()
     path = _store_path()
     tmp = path.with_suffix(".json.tmp.%d" % os.getpid())
-    fd = memo._open_private(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    fd = secure_store.open_private(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
     try:
         os.write(fd, json.dumps(data, indent=2, sort_keys=True).encode("utf-8"))
     finally:
@@ -630,7 +625,7 @@ def record_verdict(verdict: dict[str, Any], ttl_days: int | None = DEFAULT_TTL_D
     if not record["mac"]:
         return False
     try:
-        with memo._store_lock():
+        with secure_store.store_lock():
             store = _read_store()
             _sweep(store)
             if len(store["verdicts"]) >= MAX_VERDICTS:
@@ -642,7 +637,7 @@ def record_verdict(verdict: dict[str, Any], ttl_days: int | None = DEFAULT_TTL_D
         return False
     _log("warn" if record["verdict"] == DANGER else "allow", "inspection_recorded",
          repo=repo, commit=commit[:12], inspect_verdict=record["verdict"],
-         indicators=",".join(record["indicators"]), memo_key=record["key"][:12])
+         indicators=",".join(record["indicators"]), verdict_key=record["key"][:12])
     return True
 
 
@@ -724,7 +719,7 @@ def entries() -> list[dict[str, Any]]:
 def forget(prefix: str) -> int:
     """Remove verdicts whose key starts with ``prefix``. Returns how many."""
     doomed: list[str] = []
-    with memo._store_lock():
+    with secure_store.store_lock():
         store = _read_store()
         doomed = [key for key in store["verdicts"] if key.startswith(prefix)]
         for key in doomed:
@@ -732,12 +727,12 @@ def forget(prefix: str) -> int:
         if doomed:
             _write_store(store)
     if doomed:
-        _log("warn", "inspection_forgotten", count=len(doomed), memo_key=prefix[:12])
+        _log("warn", "inspection_forgotten", count=len(doomed), verdict_key=prefix[:12])
     return len(doomed)
 
 
 def forget_expired() -> int:
-    with memo._store_lock():
+    with secure_store.store_lock():
         store = _read_store()
         gone = _sweep(store)
         if gone:
@@ -748,8 +743,8 @@ def forget_expired() -> int:
 def _log(decision: str, pattern: str, **extra: Any) -> None:
     """Record one inspection event. Best effort, and never level-floored.
 
-    Same contract as the memo records: a stored verdict can quiet a later prompt,
-    so it has to leave at least as much trail as the prompt it replaces.
+    A stored verdict can quiet a later prompt, so it has to leave at least as
+    much trail as the prompt it replaces.
     ``inspect_remote`` is in ``hook_logging._UNSUPPRESSIBLE_GUARDS``, which is
     where that contract now lives.
     """

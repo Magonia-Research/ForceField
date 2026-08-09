@@ -244,11 +244,11 @@ _PORT_MAP = (
 # anchor is a header name rather than a program, and a header name turns up in
 # prose and in config templates far more often than `sshpass` does.
 #
-# Masking one of these is not free. `redact_secrets` is a decision input at
-# `memo.py`, where a credential-bearing subject is refused, so
-# `echo 'api-key: PLACEHOLDER' >> settings.yml` had `/forcefield:remember` tell
-# the user to rotate a credential that does not exist -- and the record gained a
-# `forcefield.redacted_fields` entry asserting a masking that masked nothing.
+# Masking one of these is not free. It costs the log record its most useful
+# field and puts a `forcefield.redacted_fields` entry on it asserting a masking
+# that masked nothing -- so `echo 'api-key: PLACEHOLDER' >> settings.yml` reads
+# back as a command that carried a credential when it carried the word
+# PLACEHOLDER.
 #
 # **The vocabulary is CLOSED and every segment of the value must be in it.**
 # The first form of this construct was a *prefix* rule --
@@ -271,8 +271,8 @@ _PLACEHOLDER_WORD = (
 )
 # A `printf`/`echo -e` conversion specification is not a value either. Measured:
 # `printf 'x-api-key: %s\n' "$API_KEY"` had `api_key_header` consume `%s\n` as
-# the header's value, so `/forcefield:remember` refused a command whose entire
-# point is that the secret comes from the environment.
+# the header's value -- recording a credential for a command whose entire point
+# is that the secret comes from the environment.
 #
 # **The width field must not start with `0`.** That is printf's own rule -- a
 # leading `0` IS the zero-pad flag, never a width digit -- and spelling it
@@ -353,11 +353,9 @@ _REDACTION_ONLY_PATTERNS = {
     # `pip install --user git+https://…` (the `:` is a URL scheme) and
     # `docker run -u 1000:1000` / `docker exec -u root:root` /
     # `podman run -u nobody:nogroup` (the `:` is uid:gid). That is not a free
-    # over-mask: `redact_secrets` is a decision input at `memo.py`, where a
-    # credential-bearing subject is refused, so `/forcefield:remember` told the
-    # user to rotate a credential that did not exist; and `rsync -u host:/path`
-    # raises a real `exfil_guard` `remote_copy` ask whose record then lost its
-    # destination -- the most useful field on an exfil finding.
+    # over-mask: `rsync -u host:/path` raises a real `exfil_guard` `remote_copy`
+    # ask whose record then lost its destination -- the most useful field on an
+    # exfil finding.
     #
     # `_SEG` rather than `[^\n]` for the gap, so the anchor cannot reach across
     # a command separator into an unrelated program's flags.

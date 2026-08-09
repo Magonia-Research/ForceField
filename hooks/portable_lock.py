@@ -134,7 +134,7 @@ class FileLock:
     ``with FileLock(handle) as locked:`` -- ``locked`` is True if the lock is
     held for the body and False if it could not be taken. The body runs either
     way: the caller decides what an unlocked run means. That is deliberate and
-    matches ``memo._store_lock``, which yields None and lets the caller proceed
+    matches ``secure_store.store_lock``, which yields None and lets the caller proceed
     rather than block a tool call on contention.
 
     ``timeout=0`` is a single non-blocking attempt.
