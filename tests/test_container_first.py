@@ -213,8 +213,9 @@ print("PASS: registered once at PreToolUse[Bash] with a %dms budget" % TIMEOUT_M
 # is unreachable without a config file and is covered in the ceiling section.
 #
 # There is no `ask` for a host install any more: both container-first reminders are
-# `allow` + additionalContext, so the only remaining `ask` this script emits is for
-# an over-privileged container flag or a segment_cap it could not inspect.
+# `allow` + additionalContext, and a segment_cap that could not finish inspecting
+# now reports rather than prompts. The only remaining `ask` this script emits is
+# for an over-privileged container flag.
 check("rm -rf ./build", "deny")
 check("docker run --privileged img", "ask")
 check(PIP + " requests", "allow+ctx")
@@ -1020,13 +1021,18 @@ check("; ".join(["true"] * 400) + "; make all", "allow+ctx",
 check("; ".join(["true"] * 400), "allow",
       "filler with no install or interpreter token skips the loop entirely")
 
-# ...but real token-carrying segments do, and an install hidden past the cap --
-# never reached by the loop at all -- has to fail CLOSED to a prompt, the way
-# the missing-jq and oversized-payload paths above do.
-check("; ".join(["make all"] * 60) + "; " + PIP + " evil", "ask",
-      "an install past SEG_MAX must prompt rather than fall through to allow")
+# ...but real token-carrying segments do, and an install hidden past the cap is
+# never reached by the loop at all. That used to fail closed to a PROMPT, which
+# was the wrong currency: everything this loop decides is which of two passive
+# reminders to print, since `host_install` and `host_interp` both end at `allow`
+# + additionalContext. A prompt spent on the accuracy of a hint is exactly the
+# friction the guard's own "hygiene preference, not a security boundary" comment
+# argues against. The cap now assumes the stronger reminder and says it
+# truncated -- still logged, so the coverage it dropped stays visible.
+check("; ".join(["make all"] * 60) + "; " + PIP + " evil", "allow+ctx",
+      "a truncated scan reports the stronger reminder instead of prompting")
 assert logged_pattern("; ".join(["make all"] * 60) + "; " + PIP + " evil") \
-    == "segment_cap", "the cap must log why it could not finish"
+    == "segment_cap", "the cap must still log that it stopped inspecting"
 _checks += 2
 
 _per_segment = elapsed("; ".join(['make "all" X=1'] * 30)) / 30

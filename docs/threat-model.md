@@ -1063,6 +1063,15 @@ hook `deny` is absolute in every mode.
 encoding, a payload assembled at runtime, or an action taken through a tool ForceField does not
 gate will pass.
 
+**A heredoc body is scanned only where the shell treats it as command text.**
+`container_first.sh` and `normalize.strip_heredoc_bodies` (which every Python guard inherits
+through `detection_variants`) drop a heredoc body from pattern matching for a text-filing command
+(`git`/`cat`/`tee`) at any quoting, and for a non-shell interpreter (`python`/`node`/`ruby`/`perl`)
+only when the delimiter is quoted — `<<'PY'` is the shell promising not to expand the body, while
+an unquoted `<<PY` still expands `$(...)` and keeps its bytes. A `bash`/`sh`/`zsh` heredoc keeps
+its bytes at any quoting, because there the body IS command text. The line carrying the `<<` itself
+is never dropped.
+
 **The Sigma layer is opt-in, advisory by default, and anchored on the first token.** It does
 nothing until `scripts/install.sh` compiles a ruleset, it warns rather than prompts under the
 shipped `balanced` preset, and 83 of its 106 rules need the binary they name to lead the command

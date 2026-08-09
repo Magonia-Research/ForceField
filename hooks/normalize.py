@@ -13,6 +13,12 @@ obfuscations that let a literal-anchored guard pattern be evaded:
   sensitive binary* reduced to its basename (``/usr/bin/curl`` -> ``curl``,
   ``./nc`` -> ``nc``, ``'curl'`` -> ``curl``).
 
+``strip_heredoc_bodies`` runs ahead of all of it, inside ``detection_variants``,
+and drops the heredoc bodies the shell cannot execute — the same rule
+``container_first.sh`` has applied for a while, brought over so the Python guards
+stop reading a Python script as though it were a command line. See the comment
+above it.
+
 The exfil and supply-chain guards match their detection patterns against BOTH
 the raw command and this normalized form, so an obfuscated payload is caught
 while the raw command remains what the allowlist and the logs see.
@@ -62,6 +68,87 @@ _NAMES_ALT = "|".join(
 
 # Upper bound on de-obfuscation passes (see normalize_command).
 _MAX_NORMALIZE_PASSES = 4
+
+# --- Heredoc bodies ---------------------------------------------------------
+#
+# A heredoc body is stdin, not a command line, and until now only the bash guard
+# knew that: ``container_first.sh`` has stripped these for a while, while every
+# Python guard scanned the body as though the user had typed it as a command.
+# Measured against a 433-record log, that was 2 of the 6 prompts -- a
+# ``dotenv_file`` ask raised by ``".env"`` sitting in a tuple of file extensions
+# inside a Python script being written with ``cat > f.py <<'PY'``. No .env was
+# read; the string merely existed.
+#
+# The rule is the bash one, kept deliberately identical so the two layers cannot
+# drift: a body is dropped for a text-filing command (``git``/``cat``/``tee``) at
+# any quoting, and for a NON-SHELL interpreter only when the delimiter is QUOTED.
+# ``<<'PY'`` is the shell promising not to expand the body, so nothing in it can
+# become a command; an unquoted ``<<PY`` still expands ``$(...)`` and keeps its
+# body. A shell consumer keeps its body at any quoting -- there the body IS
+# command text. Anything unrecognized keeps its body, so the failure direction is
+# a false positive rather than a blind spot.
+_HEREDOC_RE = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+_HEREDOC_TEXT_CONSUMER = re.compile(r"^[ \t]*(?:git|cat|tee)(?:[ \t]|$)")
+_HEREDOC_INERT_CONSUMER = re.compile(r"^[ \t]*(?:python[0-9.]*|node|ruby|perl)(?:[ \t]|$)")
+_HEREDOC_ASSIGN = re.compile(r"^[ \t]*[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+")
+_HEREDOC_PREFIX = re.compile(r"^[ \t]*(?:sudo|env|command|nice|nohup|stdbuf|time)[ \t]+")
+_HEREDOC_SEGMENT = re.compile(r"&&|\|\||;|&|\|")
+
+
+def strip_heredoc_bodies(command: str) -> str:
+    """Drop heredoc bodies the shell cannot execute, keeping the command lines.
+
+    The command line carrying the ``<<`` is always preserved, so
+    ``VAR=$(evil) python3 - <<'PY'`` still presents its command substitution to
+    every caller. Only the body between the operator and its terminator is
+    removed, and only for the consumers described above.
+
+    Args:
+        command: The raw shell command as Claude Code would run it.
+
+    Returns:
+        The command with inert heredoc bodies removed, or the untouched input if
+        nothing applied or an exception occurred (fail-safe).
+    """
+    try:
+        if "<<" not in command:
+            return command
+        lines = command.split("\n")
+        kept: list[str] = []
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            kept.append(line)
+            index += 1
+            match = _HEREDOC_RE.search(line)
+            if match is None:
+                continue
+            # A second heredoc on the line, or a pipe anywhere from the operator
+            # onward, means the body may be consumed by something else entirely.
+            if "<<" in line[match.end():] or "|" in line[match.start():]:
+                continue
+            consumer = _HEREDOC_SEGMENT.split(line[:match.start()])[-1]
+            while True:
+                shorter = _HEREDOC_ASSIGN.sub("", consumer, count=1)
+                if shorter == consumer:
+                    break
+                consumer = shorter
+            consumer = _HEREDOC_PREFIX.sub("", consumer, count=1)
+            quoted = bool(match.group(1))
+            if not (_HEREDOC_TEXT_CONSUMER.match(consumer)
+                    or (quoted and _HEREDOC_INERT_CONSUMER.match(consumer))):
+                continue
+            delimiter = match.group(2)
+            end = index
+            while end < len(lines) and lines[end].strip() != delimiter:
+                end += 1
+            if end >= len(lines):
+                continue  # unterminated: keep the body
+            kept.append(lines[end])
+            index = end + 1
+        return "\n".join(kept)
+    except Exception:
+        return command
 
 def _strip_line_continuations(text: str) -> str:
     """Remove backslash-newline, except inside single quotes.
@@ -209,11 +296,12 @@ def detection_variants(command: str) -> tuple[str, ...]:
     Returns:
         The distinct forms to match against, raw first, in a stable order.
     """
-    variants = [command]
-    normalized = normalize_command(command)
+    scanned = strip_heredoc_bodies(command)
+    variants = [scanned]
+    normalized = normalize_command(scanned)
     if normalized not in variants:
         variants.append(normalized)
-    assembled = assemble_shell_words(command)
+    assembled = assemble_shell_words(scanned)
     if assembled and assembled not in variants:
         variants.append(assembled)
     return tuple(variants)

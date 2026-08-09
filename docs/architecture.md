@@ -71,8 +71,16 @@ which is a cache that every reinstall replaces.
 
 `normalize.py` canonicalizes a command before any pattern matches it, so shell obfuscation buys
 nothing: `${IFS}` and `$IFS` token separators, backslash escapes (`g\it` → `git`), intra-word
-quoting (`gi"t"` → `git`), redundant path slashes (`.git//hooks` → `.git/hooks`) and line
-continuations all collapse first.
+quoting (`gi"t"` → `git`) and line continuations all collapse first. Redundant path slashes
+(`.git//hooks` → `.git/hooks`) collapse in `git_guard`'s own local normalizer, not here.
+
+`detection_variants` runs `strip_heredoc_bodies` ahead of all of it, dropping a heredoc body the
+shell cannot execute before the raw command, the normalized form and the assembled form are ever
+built. A text-filing command (`git`/`cat`/`tee`) loses its body at any quoting; a non-shell
+interpreter (`python`/`node`/`ruby`/`perl`) loses it only when the delimiter is quoted; a shell
+consumer (`bash`/`sh`/`zsh`) keeps its body at any quoting, because there the body IS command text.
+The rule is the one `container_first.sh`'s `strip_heredocs` already applied, kept deliberately
+identical so the two layers cannot drift.
 
 For a guard whose findings are `ask`, widening a match only adds a prompt, which is why
 `git_guard` normalizes aggressively.

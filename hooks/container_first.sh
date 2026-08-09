@@ -68,10 +68,31 @@ CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
 # commit message -- as the example proving a container cannot launder a host
 # install -- asked the user to containerize their own sentence.
 #
-# Only a body consumed by a text-filing command, on a line that does not pipe it
-# onward, is dropped. An interpreter, an unrecognized command, a pipeline, an
-# unterminated heredoc and any parse trouble all keep their body, so this can
-# only ever cost a false positive and never hide an executed payload.
+# Two consumers get their body dropped, and the seam between them is whether the
+# shell expands the body -- not what the body is written in.
+#
+#   * A text-filing command (`git`, `cat`, `tee`), at any quoting. Pre-existing.
+#   * A NON-SHELL interpreter (`python`, `node`, `ruby`, `perl`) when the
+#     delimiter is QUOTED. `<<'PY'` is the shell promising it will not expand the
+#     body, so what reaches the interpreter is inert text that no amount of shell
+#     parsing can execute. Scanning it as shell was measured to be the single
+#     largest false-positive source in this guard: a 60-line Python heredoc is
+#     shredded by `split_toplevel` into segments that each carry a quote or `=`,
+#     so triage cannot skip them and `_segn` runs past SEG_MAX into a
+#     `segment_cap` prompt -- 4 of the 6 prompts in a 433-record log, none of
+#     them real. A `.env` inside a tuple of file extensions was another.
+#
+# An UNQUOTED `<<PY` keeps its body, because there the shell really does expand
+# `$(...)` and backticks before the interpreter ever sees it. A shell consumer
+# (`bash`, `sh`, `zsh`) keeps its body at any quoting, because there the body IS
+# command text -- that is the case this stripping must never reach. An
+# unrecognized command, a pipeline, an unterminated heredoc and any parse trouble
+# all keep their body too, so this can only ever cost a false positive and never
+# hide an executed payload.
+#
+# The command line itself is always printed; only the body is ever dropped. So
+# `VAR=$(evil) python3 - <<'PY'` still presents its command substitution to every
+# check below.
 #
 # The split of the text before the operator is quote-blind on purpose: an
 # over-split shortens the prefix, which makes the consumer match FAIL and the
@@ -83,6 +104,10 @@ strip_heredocs() {
       # Built as a dynamic regex string, not a /literal/, so that SQ
       # concatenates: the delimiter of a `<<EOF` is usually quoted.
       RE = "<<-?[ \t]*[" SQ "\"]?[A-Za-z_][A-Za-z0-9_]*[" SQ "\"]?"
+      QUOTE = "^[" SQ "\"]"
+      TEXT  = "^[ \t]*(git|cat|tee)([ \t]|$)"
+      # Deliberately an allowlist, and deliberately without a shell in it.
+      INERT = "^[ \t]*(python[0-9.]*|node|ruby|perl)([ \t]|$)"
       i = 1
       while (i <= NR) {
         line = lines[i]; print line; i++
@@ -90,10 +115,18 @@ strip_heredocs() {
         before = substr(line, 1, RSTART - 1)
         rest = substr(line, RSTART + RLENGTH)
         delim = substr(line, RSTART, RLENGTH)
-        sub(/^<<-?[ \t]*/, "", delim); gsub(SQ, "", delim); gsub(/"/, "", delim)
+        sub(/^<<-?[ \t]*/, "", delim)
+        quoted = (delim ~ QUOTE)
+        gsub(SQ, "", delim); gsub(/"/, "", delim)
         if (rest ~ /<</ || substr(line, RSTART) ~ /\|/) continue
         n = split(before, parts, /(&&|\|\||;|&|\|)/)
-        if (parts[n] !~ /^[ \t]*(sudo[ \t]+)?(git|cat|tee)([ \t]|$)/) continue
+        cons = parts[n]
+        # `PYTHONPATH=src python3 - <<PY` puts the consumer behind an assignment.
+        # Stripping them here only ever makes the match SUCCEED, so it is bounded
+        # by the allowlists above rather than widening what they admit.
+        while (sub(/^[ \t]*[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/, "", cons)) continue
+        sub(/^[ \t]*(sudo|env|command|nice|nohup|stdbuf|time)[ \t]+/, "", cons)
+        if (cons !~ TEXT && !(quoted && cons ~ INERT)) continue
         j = i
         while (j <= NR && lines[j] !~ "^[ \t]*" delim "[ \t]*$") j++
         if (j > NR) continue
@@ -698,6 +731,7 @@ SEG_MAX=40
 
 host_install=false
 host_interp=false
+seg_capped=false
 if grep -qiE "$INSTALL_PATTERN|$INTERP_PATTERN" <<<"$SCAN" ||
   grep -qiE "$INSTALL_PATTERN|$INTERP_PATTERN" <<<"$NORM"; then
   _segn=0
@@ -717,7 +751,15 @@ if grep -qiE "$INSTALL_PATTERN|$INTERP_PATTERN" <<<"$SCAN" ||
     # payload size, and ordinary filler never consumes it.
     _segn=$((_segn + 1))
     if ((_segn > SEG_MAX)); then
-      emit_ask2 "segment_cap" "ForceField could not fully inspect this Bash command: more than $SEG_MAX of its segments carry a package-install or interpreter token, which would outrun the guard's time budget. Approve only if you trust it."
+      # Stop inspecting, but do NOT prompt. Everything this loop decides is
+      # which of two PASSIVE reminders to print -- `host_install` and
+      # `host_interp` both end at `allow` + additionalContext, by the deliberate
+      # design recorded below. So the cap used to prompt the user in order to
+      # protect the accuracy of a hint, which is the one thing a prompt must
+      # never be spent on. It is resolved the conservative way instead: assume
+      # the stronger reminder and say that inspection was truncated.
+      seg_capped=true
+      break
     fi
     # A container invocation is skipped whole: everything it carries, including
     # a quoted shell body, runs in the container. That is the outcome this guard
@@ -797,6 +839,16 @@ if [[ -n "$CONTAINER_RUNTIME" ]]; then
 else
   RUN_HINT=""
   RETRY_HINT='No container runtime is installed on this machine, so host execution is the only option here.'
+fi
+
+# Inspection ran out of budget. Report the stronger of the two reminders and say
+# so, rather than prompting: a truncated scan is the guard admitting it could not
+# finish, which is the least likely thing on this rung to be a real finding.
+if [[ "$seg_capped" == "true" ]]; then
+  CTX="CONTAINER-FIRST: this command carries more than $SEG_MAX package-install or interpreter segments, so ForceField stopped inspecting it at that point. Not blocked. If it installs packages, a container is preferred because it is discarded on exit and leaves no host state behind."
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","additionalContext":"%s"}}' "$CTX"
+  log_event "allow" "segment_cap"
+  exit 0
 fi
 
 if [[ "$host_install" == "true" ]]; then

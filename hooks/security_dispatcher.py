@@ -26,6 +26,7 @@ from patterns import (  # noqa: E402
     MAX_STDIN_BYTES,
     DECISION_PRECEDENCE as _DECISION_PRECEDENCE,
 )
+from normalize import strip_heredoc_bodies  # noqa: E402
 
 # Guard imports run before ``main``'s try/except, so a syntax error in any one
 # guard, a half-finished install or a missing module raised here, the process
@@ -199,8 +200,8 @@ def _correlation_response(
     )
     # Attributed to ``filesystem_guard``, matching how this dispatcher already
     # reports its Bash-side sink findings: the finding is about a filesystem
-    # destination, and that guard is the one the config, the allowlist and
-    # ``/forcefield:remember`` already govern for these paths.
+    # destination, and that guard is the one the config and the allowlist
+    # already govern for these paths.
     return clamp_and_emit(
         "filesystem_guard", "ask", reason,
         pattern_matched="blocked_command_rerouted", command=command,
@@ -411,7 +412,7 @@ def run_self_protection_guard(
     # hook allowlist" does not tell the user they are approving code execution.
     risk = FS_PATTERN_RISKS.get(pattern_name) or (
         "this path controls what ForceField and Claude Code do next "
-        "(guard strictness, hook allowlist, remembered approvals, MCP servers)"
+        "(guard strictness, hook allowlist, signed state, MCP servers)"
     )
     return _finish(
         "filesystem_guard", "ask", command, pattern_name,
@@ -633,8 +634,17 @@ def main() -> None:
     # The head is still scanned, so an obvious hard deny in a padded command is
     # still a deny; what the tail can no longer do is buy silence. Anything past
     # the cap ends at an ask, never an allow.
-    oversized = len(command) > MAX_COMMAND_SCAN_BYTES
-    scanned = command[:MAX_COMMAND_SCAN_BYTES] if oversized else command
+    # Measured against the text that actually gets scanned, not the raw command.
+    # The cap exists because regex scanning is slow, and a heredoc body is never
+    # scanned -- so counting it was charging the budget for work nobody does. It
+    # was the last of the heredoc false positives and the most expensive rung to
+    # reach it: a 20,206-byte command, `failed_guards: []`, prompting because a
+    # Python script written with `python3 - <<'PY'` measured past 8 KiB of shell.
+    # Nothing is hidden by this. A body that IS shell -- an unquoted `<<PY`, or
+    # any `bash`/`sh` heredoc -- keeps its bytes and still counts against the cap.
+    scannable = strip_heredoc_bodies(command)
+    oversized = len(scannable) > MAX_COMMAND_SCAN_BYTES
+    scanned = scannable[:MAX_COMMAND_SCAN_BYTES] if oversized else scannable
 
     winner, failed = _run_guards(scanned, context)
     if oversized or failed:
