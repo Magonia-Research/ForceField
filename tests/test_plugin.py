@@ -3775,6 +3775,38 @@ try:
     assert _ag.reset_spawn_budget("s1") is True
     assert _ag.reset_spawn_budget("../../etc/passwd") is False
 
+    # The budget meters the expensive tier only. An absent or unparseable model
+    # meters: it is not a claim that the tier is cheap, and an omitted model
+    # inherits the session's, which is the tier this limit was written for.
+    assert _ag.is_metered_model("") is True
+    assert _ag.is_metered_model(None) is True
+    assert _ag.is_metered_model({"model": "haiku"}) is True
+    assert _ag.is_metered_model("opus") is True
+    assert _ag.is_metered_model("claude-fable-5") is True
+    assert _ag.is_metered_model("mythos") is True
+    assert _ag.is_metered_model("sonnet") is False
+    assert _ag.is_metered_model("Haiku") is False
+    assert _ag.is_metered_model("claude-haiku-4-5-20251001") is False
+
+    # An exempt spawn must not merely skip the verdict — it must not record a
+    # timestamp either, or it would spend a budget it is exempt from and the
+    # exemption would only move the prompt to a later opus spawn.
+    _unmetered = _dir / "spawn-s2.json"
+    for _ in range(_ag.MAX_SPAWNS_DENY + 5):
+        assert _ag.check_spawn_rate("s2", "haiku") is None
+    assert not _unmetered.exists(), "an unmetered spawn records no timestamp"
+
+    # ...and the exemption does not leak: the same session still gates on opus.
+    for _ in range(_ag.MAX_SPAWNS_ASK):
+        assert _ag.check_spawn_rate("s2", "opus") is None
+    _verdict = _ag.check_spawn_rate("s2", "opus")
+    assert _verdict is not None and _verdict[0] == "ask", (
+        "a metered spawn past the ask rung still asks: %r" % (_verdict,)
+    )
+    assert _ag.check_spawn_rate("s2", "sonnet") is None, (
+        "an exempt spawn is not gated by a budget an earlier metered spawn spent"
+    )
+
     # The counter file is in $HOME, which any same-uid process can replace, and
     # `_bump_spawn_count` opens it O_WRONLY|O_CREAT|O_APPEND|O_NONBLOCK and then
     # WRITES to it. O_NONBLOCK refuses a FIFO with no reader (ENXIO); it does

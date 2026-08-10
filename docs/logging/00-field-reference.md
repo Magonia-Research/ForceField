@@ -112,6 +112,7 @@ plausible one. `TraceId` is the `session_id` with its hyphens removed. `SpanId` 
 | `forcefield.network_capable` | `mcp_guard` | Whether that MCP tool can reach the network. |
 | `forcefield.intentional_search` | `output_credential_scanner` | The user's own command was searching for secrets, so the hit is expected. |
 | `forcefield.subagent_type`, `forcefield.mode` | `agent_guard` | Requested subagent type and permission mode. |
+| `forcefield.model`, `forcefield.metered` | `agent_guard` | Requested model (empty when the spawn named none and inherits the session's) and whether it counted against the spawn budget. `sonnet` and `haiku` are unmetered. |
 | `forcefield.reason` | `security_dispatcher`, `session_cleanup` | Dispatcher: `oversized_or_unparseable_input`. Cleanup: the SessionEnd reason. |
 | `forcefield.event`, `forcefield.source`, `forcefield.trigger` | `session_baseline` | Which event, the SessionStart source, the PreCompact trigger. |
 | `forcefield.sinks`, `forcefield.sinks.env` | `session_baseline` | The live sink inventory, including each sink's resolved path and availability. |

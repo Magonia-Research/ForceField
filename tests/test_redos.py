@@ -94,7 +94,7 @@ MODULES = [
     "credential_guard", "mcp_guard", "webfetch_guard", "filesystem_guard",
     "injection_defense", "agent_guard", "agent_output_guard", "normalize",
     "output_credential_scanner", "prompt_credential_guard", "patterns",
-    "subagent_stop_guard", "shell_context",
+    "subagent_stop_guard", "shell_context", "file_watch_guard",
 ]
 
 # Timing is noisy at these scales, so a ratio is only trusted once the slower run

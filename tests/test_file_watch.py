@@ -247,6 +247,61 @@ if True:
              dict(event, file_path=os.path.join(str(home), "notes.md")), env)
     check(len(watch_records()) == 2, "a path matching no sink writes no record")
 
+    # Half three: the regression this rule exists for. `record_self` shipped
+    # with no production caller at all -- defined, documented and tested here,
+    # and called nowhere -- so every agent spawn bumped the counter, produced a
+    # filesystem event nothing accounted for, and warned the user that
+    # ForceField's own control surface had changed out of band. Measured before
+    # the fix: 289 file_watch_guard records in the shipped log, every one of
+    # them a ForceField file and every one `attribution: none`.
+    import agent_guard  # noqa: PLC0415
+    from file_watch_guard import classify as file_watch_guard_classify  # noqa: PLC0415
+
+    spawn_session = "33333333-4444-5555-6666-777777777777"
+    spawn_path = write_ledger.state_dir() / ("spawn-%s.json" % spawn_session)
+    agent_guard.check_spawn_rate(spawn_session, "opus")
+    check(write_ledger.attribution(
+        spawn_session, os.path.realpath(str(spawn_path))) == "self",
+        "a spawn bump records itself, so the counter write is attributable")
+    proc = run_hook("file_watch_guard.py",
+                    dict(event, file_path=str(spawn_path),
+                         session_id=spawn_session), env)
+    check("systemMessage" not in json.loads(proc.stdout or "{}"),
+          "ForceField's own spawn bump does not warn about ForceField")
+    found = watch_records()
+    check(len(found) == 3 and found[-1]["Attributes"]["forcefield.attribution"]
+          == "self", "and it is recorded as a self-write, not dropped")
+
+    # An UNMETERED spawn writes no counter at all, so there is nothing to
+    # attribute and nothing to warn about either.
+    check(agent_guard.check_spawn_rate(spawn_session + "-x", "haiku") is None,
+          "an unmetered spawn is not gated")
+    check(not (write_ledger.state_dir()
+               / ("spawn-%s-x.json" % spawn_session)).exists(),
+          "an unmetered spawn writes no counter file to watch")
+
+    # The two journal exemptions. Both are paths ForceField appends to as a
+    # matter of course where the watcher cannot distinguish its own write from
+    # anyone else's, so they are filtered before classification.
+    ledger = str(write_ledger.ledger_path(SESSION))
+    check(file_watch_guard_classify(ledger) is None,
+          "the write ledger itself is not a watcher sink")
+    venv = os.path.join(str(home), ".claude", "forcefield", "sigma", "venv",
+                        "lib", "python3.11", "site-packages", "yaml", "x.py")
+    check(file_watch_guard_classify(venv) is None,
+          "the Sigma venv is not a watcher sink")
+
+    # ...and the exemption is two named shapes, not the directory. Everything
+    # the directory is actually watched to protect still classifies.
+    for still_watched in (
+        str(spawn_path),
+        os.path.join(str(home), ".claude", "forcefield", "store.key"),
+        os.path.join(str(home), ".claude", "forcefield", "sigma", "rules.json"),
+        os.path.join(str(home), ".claude", "forcefield", "state", "ledger.jsonl"),
+    ):
+        check(file_watch_guard_classify(still_watched) is not None,
+              "%s is still watched" % os.path.basename(still_watched))
+
 
 # ---------------------------------------------------------------------------
 # Correspondence: watch roots against the sink patterns

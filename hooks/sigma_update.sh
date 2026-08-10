@@ -138,18 +138,36 @@ fi
     --min-level medium \
     >/dev/null 2>&1
 
+  # The compile just rewrote a file inside a watched directory, so tell the
+  # ledger it was us. Unattributed, `file_watch_guard` reports the ruleset
+  # refresh as an out-of-band change to ForceField's own control surface —
+  # which is precisely the shape of the event that SHOULD warn when somebody
+  # else does it, so leaving ours unattributed spends the warning.
+  #
+  # Outside the `before != after` branch below: the compiler rewrites
+  # rules.json on every run, including one where the upstream repo did not
+  # move, and the watcher fires on the write rather than on the diff.
+  #
+  # jq is container_first.sh's dependency, not this hook's, and python3 is
+  # already required here -- so the id comes out of the event with the
+  # interpreter that is about to use it. Single quoted, because
+  # tests/test_portability.py parses every `python3 -c` program in scripts/ and
+  # hooks/ under the 3.9 grammar.
+  SESSION_ID=$(printf '%s' "$EVENT" | python3 -c \
+    'import json,sys; print(json.load(sys.stdin).get("session_id") or "")' \
+    2>/dev/null || true)
+  if [[ -n "$SESSION_ID" ]]; then
+    python3 -c 'import os, sys
+sys.path.insert(0, sys.argv[1])
+import write_ledger
+write_ledger.record_self(sys.argv[2], os.path.realpath(sys.argv[3]))' \
+      "$PLUGIN_ROOT/hooks" "$SESSION_ID" "$RULES_JSON" >/dev/null 2>&1 || true
+  fi
+
   # A rule refresh changes what every subsequent Bash call is measured against,
   # and it left no trace at all: this hook was one of the two that never logged,
   # so "which upstream commit was I running?" had no answer after the fact.
   if [[ "$before" != "$after" ]]; then
-    # jq is container_first.sh's dependency, not this hook's, and python3 is
-    # already required on the next line -- so the id comes out of the event with
-    # the interpreter that is about to write the record. One line, single
-    # quoted: tests/test_portability.py parses every `python3 -c` program in
-    # scripts/ and hooks/ under the 3.9 grammar.
-    SESSION_ID=$(printf '%s' "$EVENT" | python3 -c \
-      'import json,sys; print(json.load(sys.stdin).get("session_id") or "")' \
-      2>/dev/null || true)
     printf '%s' "$SIGMA_REPO" |
       python3 "$PLUGIN_ROOT/hooks/hook_logging.py" \
         --hook sigma_update \

@@ -276,13 +276,22 @@ def record_self(session_id: str | None, path: str) -> bool:
     """Note that ForceField wrote this path itself.
 
     ``~/.claude/forcefield/`` is watched *and* written to by ForceField, so
-    without this every ledger append, spawn counter and inspection verdict would
-    produce a filesystem event that produced a record.
+    without this every spawn counter bump and every ruleset refresh produces a
+    filesystem event that warns the user about ForceField's own control surface.
+    It shipped with no production caller at all — defined, documented and
+    covered by ``tests/test_file_watch.py``, and called nowhere — which is why
+    all 289 ``file_watch_guard`` records in the shipped log read
+    ``attribution: none``. The test passed throughout, because it called this
+    function itself.
 
     The suppression this feeds is deliberately attribution-based rather than
     path-based. Excluding the state directory by path would also blind the guard
     to an agent editing the spawn counters, which is the specific thing the
-    ``forcefield_state`` sink exists to catch.
+    ``forcefield_state`` sink exists to catch. ``file_watch_guard`` filters two
+    named journal shapes — this file and the Sigma venv — before classification,
+    for the narrower reason that a filesystem event on an append-only journal
+    cannot distinguish our append from anyone else's; every line here carries an
+    HMAC precisely because that is the control which can.
     """
     return _append(session_id, {"kind": _KIND_SELF, "path": path,
                                 "tool": "forcefield"})

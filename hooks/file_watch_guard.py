@@ -26,10 +26,16 @@ The watch set is delivered separately, by ``session_baseline`` through
 
 Three attribution classes, not two. A change is either accounted for by a gated
 tool call, or by ForceField writing its own state, or by nothing — and only the
-third is worth a record. The distinction is made from the ledger rather than
-from the path, because suppressing ``~/.claude/forcefield/state`` by path would
-also blind this hook to an agent editing the spawn counters, which is the
+third is worth interrupting for. The distinction is made from the ledger rather
+than from the path, because suppressing ``~/.claude/forcefield/state`` by path
+would also blind this hook to an agent editing the spawn counters, which is the
 specific thing that directory is watched to catch.
+
+``_SELF_JOURNALS`` is the one exception and it is deliberately not that rule
+relaxed: it names two shapes ForceField appends to as a matter of course, where
+a filesystem event carries no information even in principle. Everything else
+under that directory — the spawn counters, ``store.key``, the compiled ruleset —
+stays watched and is attributed through the ledger.
 
 Fail-open, like every other hook here: any error yields an empty response.
 """
@@ -37,6 +43,7 @@ Fail-open, like every other hook here: any error yields an empty response.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -75,6 +82,31 @@ def build_response(cwd: str | None) -> dict:
     }
 
 
+# ForceField's own append-only journals, where a filesystem event cannot carry
+# signal in the first place.
+#
+# The write ledger is appended to by every gate that passes, so a change to it
+# is expected *by construction* — and the watcher cannot tell ForceField's
+# append from anyone else's, because both are "the file grew". The control that
+# can tell them apart is the per-line HMAC, and it already does, at read time.
+# Reporting the file it is asked to consult produced 239 of the 289
+# ``file_watch_guard`` records in the shipped log, every one of them ForceField
+# reading its own tail.
+#
+# The Sigma venv is 1,008 files of third-party Python written by
+# ``scripts/install.sh``, which runs outside any session and so has no id to
+# attribute a write to. Nothing could ever account for that burst.
+#
+# Scoped to THIS hook deliberately. ``filesystem_guard`` still gates a Write, an
+# Edit or a shell redirect naming either path, because those arrive as a tool
+# call that can be refused. This is the passive watcher's noise floor, not a
+# hole in the gates — and it is two named shapes, not the state directory, so
+# the spawn counters this directory is watched to protect stay watched.
+_SELF_JOURNALS = re.compile(
+    r"/\.claude/forcefield/(?:state/ledger-[^/]*\.jsonl$|sigma/venv/)"
+)
+
+
 def classify(file_path: str) -> tuple[str, str] | None:
     """``(sink_name, canonical_path)`` if this path is a watched sink, else None.
 
@@ -93,6 +125,8 @@ def classify(file_path: str) -> tuple[str, str] | None:
 
     canonical = _canonical(file_path)
     if not canonical:
+        return None
+    if _SELF_JOURNALS.search(canonical):
         return None
     for patterns in (CONFIG_SINK_PATTERNS, WRITE_SINK_PATTERNS):
         for name, pattern in patterns.items():

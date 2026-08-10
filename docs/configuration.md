@@ -223,7 +223,7 @@ Reach for the narrowest relief: allowlist one pattern or path → soften one gua
 | Any `git clone` or `gh repo clone` | git_guard | ask | Clone with `git -c core.hooksPath=/dev/null clone --no-recurse-submodules <url>`, which the guard passes silently — the prompt names that command. It does not stop on a patched git, because neither setting is a patch for either CVE. Otherwise allowlist `unhardened_clone` for that repo. See [the clone redirect](threat-model.md#the-clone-redirect) |
 | Submodule init or a recursing pull in a trusted repo | git_guard | ask *(context only on a patched git)* | Update git first, which closes both CVEs and the prompt stops on its own. Otherwise allowlist `submodule_update` / `submodule_recurse_fetch` for that repo |
 | `git clone ext::…` | git_guard | **deny** | Not loosenable except by preset. The transport runs its URL as a shell command; see [the threat model](threat-model.md#the-twelve-patterns) |
-| Many subagent spawns hitting the rate limit | agent_guard | **deny** | `permissive`; the 10/20 limit is not otherwise tunable |
+| Many subagent spawns hitting the rate limit | agent_guard | **deny** | Spawn on `sonnet` or `haiku`, which are not metered at all; otherwise `permissive`, since the 10/20 limit is not tunable |
 | MCP call carrying base64 or a long token | mcp_guard | ask | Allowlist the pattern for that server |
 | WebFetch URL with an encoded query blob | webfetch_guard | ask | Allowlist it, or `webfetch_guard: warn` in home config; exfil domains stay denied |
 

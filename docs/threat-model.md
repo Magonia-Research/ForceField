@@ -748,6 +748,14 @@ detects injection and dangerous permission modes, flags excessive privilege and 
 bounds prompt size, and rate-limits spawns over a rolling hour (10 ask, 20 deny). It injects the
 security constraints into the subagent's own prompt so the child inherits them.
 
+The rate limit meters the expensive model tier only. A spawn naming `sonnet` or `haiku` is not
+counted, not recorded and not gated, because ordinary fan-out onto the small models was what the
+budget kept prompting on, and a limit that fires on routine work is one the operator learns to
+click through. A spawn that names no model at all is metered: the child then inherits the
+session's model, so an unspecified tier is not a claim that the tier is cheap. The cost of that
+narrowing is stated plainly — a runaway delegation loop confined to `sonnet` or `haiku` children
+is no longer bounded by this control.
+
 A credential in a subagent prompt is one of the few things that denies outright:
 
 ```json

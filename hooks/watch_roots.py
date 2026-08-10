@@ -25,8 +25,10 @@ watching its directory means every record written triggers an event that writes 
 record. The four files that matter there are named individually instead.
 
 ``~/.claude/forcefield`` IS a root, and its cost is known: 1,013 files, of which
-1,008 are the Sigma venv. A ``sigma_update.sh`` run therefore produces a burst,
-which is exactly what the self-write suppression in ``file_watch_guard`` absorbs.
+1,008 are the Sigma venv. That venv is written by ``scripts/install.sh``, which
+runs outside any session and so has no id to attribute a write to — nothing
+could ever account for the burst, so ``file_watch_guard`` filters it by path
+before classification rather than pretending the ledger will explain it.
 Watching the parent rather than listing its files is still correct, because a
 ``store.key`` replaced under it is the thing worth catching.
 

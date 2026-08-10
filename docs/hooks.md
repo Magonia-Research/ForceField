@@ -132,7 +132,7 @@ output flags: a blocked command naming no file is not correlated at all.
 | Credential Guard | Write/Edit | Detects API keys, tokens, private keys and passwords in file writes |
 | Filesystem Guard | Write/Edit/MultiEdit/NotebookEdit, and Read | Guards the write *destination* (credential stores, shell init, persistence, `/etc`, plugin config) and gates credential-store reads. Canonicalizes paths to resist `../` and symlink evasion. All findings **ask** |
 | MCP Guard | `mcp__.*` | Scans every MCP tool's arguments for credential and exfil patterns. Any server can be an exfil channel |
-| Agent Guard | Agent | Least-privilege spawning: blocks credential leakage, detects injection, dangerous modes, excessive privilege, sensitive paths, prompt size. Injects constraints into subagent prompts. Rate-limits spawns over a rolling hour (10 ask, 20 deny), clearable with `agent_guard.py --reset-spawns <session-id>` |
+| Agent Guard | Agent | Least-privilege spawning: blocks credential leakage, detects injection, dangerous modes, excessive privilege, sensitive paths, prompt size. Injects constraints into subagent prompts. Rate-limits spawns over a rolling hour (10 ask, 20 deny) on the expensive model tier only — `sonnet` and `haiku` spawns are neither counted nor gated — clearable with `agent_guard.py --reset-spawns <session-id>` |
 | WebFetch Guard | WebFetch | Denies known exfil and tunneling domains, asks on embedded credentials, encoded blobs, or sensitive query params |
 
 ## PostToolUse

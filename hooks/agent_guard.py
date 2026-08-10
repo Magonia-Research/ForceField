@@ -41,6 +41,19 @@ MAX_SPAWNS_DENY = 20
 # work rolls off on its own.
 SPAWN_WINDOW_SECONDS = 3600
 
+# Model tiers whose spawns are not metered at all: not counted, not recorded,
+# never gated. Ordinary fan-out onto the small models is the shape this budget
+# kept prompting on, and a rate limit that fires on routine work is one the user
+# learns to click through.
+#
+# Matched as a substring of the lowercased value, so the alias the Agent tool
+# accepts ("haiku") and a full model id ("claude-haiku-4-5-20251001") land in
+# the same tier without a second list to keep in step.
+#
+# **This narrows the control deliberately.** A runaway delegation loop that
+# spawns only sonnet or haiku children is no longer bounded by anything here.
+UNMETERED_SPAWN_MODELS = ("sonnet", "haiku")
+
 sys.path.insert(0, str(Path(__file__).parent))
 import patterns as _patterns  # noqa: E402
 from patterns import MAX_STDIN_BYTES, DECISION_PRECEDENCE as _DECISION_PRECEDENCE  # noqa: E402
@@ -54,7 +67,7 @@ from hook_logging import clamp_and_emit, defer_log, emit, log_security_event  # 
 # three modules share them now, and this is the heaviest of the three, so
 # reaching them from the PreToolUse[Write] path through here would pull the
 # credential and logging stack in behind one path lookup.
-from write_ledger import safe_session_id, state_dir  # noqa: E402
+from write_ledger import record_self, safe_session_id, state_dir  # noqa: E402
 
 SECURITY_CONSTRAINTS = """\
 SECURITY CONSTRAINTS (enforced by automated hooks — violations will be blocked):
@@ -582,11 +595,58 @@ def check_prompt_size(prompt: str) -> tuple[str, str, str] | None:
     return None
 
 
-def check_spawn_rate(session_id: str) -> tuple[str, str, str] | None:
-    if not session_id:
+def _note_self_write(session_id: str, path: Path) -> None:
+    """Tell the ledger that ForceField, not an agent, bumped this counter.
+
+    Without it the spawn counter is the one file ForceField writes on a hot path
+    that nothing can account for, so ``file_watch_guard`` reported every single
+    spawn as an out-of-band change to ForceField's own control surface — a
+    warning that fired on the guard doing its job and on nothing else, which is
+    the fastest way to teach an operator to ignore the warning that matters.
+
+    Recorded as the REALPATH, because that is what ``file_watch_guard`` will
+    canonicalize the watcher's event to before it looks the path up. The two
+    sides of a comparison have to normalize the same way or it silently never
+    matches.
+
+    Best-effort by construction. The verdict is already decided by the time this
+    runs and a lost ledger line costs an attribution, not a decision.
+    """
+    try:
+        record_self(session_id, os.path.realpath(str(path)))
+    except Exception:  # noqa: BLE001 - never trade a verdict for a ledger line
+        pass
+
+
+def is_metered_model(model: object) -> bool:
+    """Whether a spawn at this model counts against the rolling budget.
+
+    An ABSENT model is metered, and that is the whole of the judgement here.
+    ``model`` is optional on the Agent tool: omitted, the child inherits the
+    session's model, which is the expensive tier in any session that has one.
+    Measured across this machine's transcripts, 75 of 141 Agent calls named no
+    model at all — so reading "unspecified" as unmetered would exempt the
+    majority of spawns and switch the limit off for the case it exists for.
+
+    A non-string is metered for the same reason: it is not a claim about the
+    tier, so it cannot be a claim that the tier is cheap.
+    """
+    if not isinstance(model, str):
+        return True
+    lowered = model.lower()
+    for tier in UNMETERED_SPAWN_MODELS:
+        if tier in lowered:
+            return False
+    return True
+
+
+def check_spawn_rate(session_id: str,
+                     model: object = "") -> tuple[str, str, str] | None:
+    if not session_id or not is_metered_model(model):
         return None
     state_path = state_dir() / f"spawn-{session_id}.json"
     count = _bump_spawn_count(state_path, time.time())
+    _note_self_write(session_id, state_path)
 
     window_minutes = SPAWN_WINDOW_SECONDS // 60
     if count >= MAX_SPAWNS_DENY:
@@ -595,7 +655,8 @@ def check_spawn_rate(session_id: str) -> tuple[str, str, str] | None:
             "rate:deny",
             f"AGENT GUARD: Agent spawn rate limit exceeded ({count} in the last "
             f"{window_minutes} minutes)\n\n"
-            f"Maximum {MAX_SPAWNS_DENY} agent spawns per {window_minutes} minutes.\n"
+            f"Maximum {MAX_SPAWNS_DENY} agent spawns per {window_minutes} minutes "
+            f"(spawns on {' and '.join(UNMETERED_SPAWN_MODELS)} are not counted).\n"
             f"This may indicate a runaway delegation loop.\n\n"
             f"The budget rolls off on its own as older spawns age out. To clear it "
             f"now:\n"
@@ -609,7 +670,8 @@ def check_spawn_rate(session_id: str) -> tuple[str, str, str] | None:
             f"AGENT GUARD: High agent spawn count ({count} in the last "
             f"{window_minutes} minutes)\n\n"
             f"Consider whether this many subagents are necessary.\n"
-            f"High spawn counts may indicate unbounded delegation.",
+            f"High spawn counts may indicate unbounded delegation.\n"
+            f"Spawns on {' and '.join(UNMETERED_SPAWN_MODELS)} are not counted.",
         )
     return None
 
@@ -630,7 +692,7 @@ def run_all_checks(data: dict) -> dict | None:
         check_exfiltration(prompt),
         check_sensitive_paths(prompt),
         check_prompt_size(prompt),
-        check_spawn_rate(session_id),
+        check_spawn_rate(session_id, tool_input.get("model", "")),
     ]
 
     best = None
@@ -736,9 +798,15 @@ def main() -> None:
         else:
             subagent_type = tool_input.get("subagent_type", "")
             mode = tool_input.get("mode", "")
+            model = tool_input.get("model", "")
+            # The model is recorded because it now decides whether the spawn
+            # budget applies at all: without it in the record, how much of the
+            # limit was exempted is not answerable from the log.
             defer_log(
                 "agent_guard", "allow", context=context_from_event(data),
-                extra={"subagent_type": subagent_type, "mode": mode},
+                extra={"subagent_type": subagent_type, "mode": mode,
+                       "model": model if isinstance(model, str) else "",
+                       "metered": is_metered_model(model)},
             )
             emit(safe_response if safe_response else {})
     except Exception:
