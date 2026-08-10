@@ -331,6 +331,23 @@ check_all("allow", (
     "printf '\\U0001F600'",
 ))
 
+# An encoded QUOTE hides nothing, and denying it broke ordinary work. Measured
+# in the shipped log: a `python3 -c` regex spelling a quote as \x27 -- because
+# the nesting left no way to type one -- was hard-denied as an obfuscated
+# command. A command name is letters, so every payload above still dies.
+check_all("allow", (
+    "grep -o 'url(\\x27' file.css",
+    "printf '%-6s' \"$(python3 -c \"import re;print(re.findall(r'[\\x27\\x22]',s))\")\"",
+    "echo $'\\047'",
+))
+# An interpreter on the host still draws its own container-first context; what
+# matters is that the encoded quote inside its program is not a hard deny.
+check("node -e 'x.split(\\x27,\\x27)'", "allow+ctx")
+check_all("deny", (
+    # A quote alongside encoded letters is still the letters' verdict.
+    "eval $'\\x27\\x72\\x6d\\x27'",
+))
+
 check_all("deny", (
     "nsenter -t 1 -m -u -i -n sh",
     "unshare -m /bin/sh",

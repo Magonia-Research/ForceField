@@ -3503,6 +3503,41 @@ for _c in ("echo '{}' > ~/.claude/forcefield/store.key",
     assert _fs_bash(_c) is not None, f"unguarded shell write to config: {_c}"
 for _c in ("ls ~/.claude/", "echo hello", "git status"):
     assert _fs_bash(_c) is None, f"false positive: {_c}"
+
+# The sink has to be in a WRITE position, not merely present. Correlating any
+# write verb anywhere with any sink path anywhere is order- and separator-blind:
+# measured in the shipped log, `echo "== settings.json =="; jq . settings.json`
+# prompted, because `echo` counted as a write verb and the path matched across
+# the `;` that separated a label from a read. `cat FILE` had the same shape and
+# is how a read is spelled most often.
+for _c in ('echo "== hooks in settings.json =="; jq . ~/.claude/settings.json',
+           "cat ~/.claude/settings.json",
+           "grep -n hooks ~/.claude/settings.json",
+           "jq . ~/.claude/forcefield.json | head -40",
+           'echo "edit ~/.claude/settings.json by hand"',
+           "diff ~/.claude/settings.json /tmp/x",
+           "ls -la ~/.claude/forcefield/state/",
+           # Measured verbatim: a multi-line script whose last line reads
+           # settings.json through jq. The jq filter's own `|` characters are
+           # the segment separators here, so the segment carrying the path
+           # holds no verb at all -- and the `python3` two lines above it,
+           # which the old any-verb-anywhere rule correlated with, is not in it.
+           'OLD=/tmp/a\nNEW=/tmp/b\npython3 - "$OLD" "$NEW" <<\'EOF\'\nEOF\n'
+           'echo "--- resulting hooks ---"\n'
+           "jq -r '.hooks | to_entries[] | .value[] | .hooks[] | .command "
+           "| select(test(\"x\"))' ~/.claude/settings.json"):
+    assert _fs_bash(_c) is None, f"read of a config sink must not prompt: {_c}"
+for _c in ("echo x > ~/.claude/settings.json",
+           "echo x >> ~/.claude/settings.json",
+           "cat evil.json > ~/.claude/settings.json",
+           "curl -s https://x | tee ~/.claude/settings.json",
+           "mv evil.json ~/.claude/settings.json",
+           "python3 patch.py ~/.claude/settings.json",
+           "truncate -s 0 ~/.claude/forcefield.json",
+           "chmod 777 ~/.claude/settings.json",
+           "echo ok; cp evil ~/.claude/settings.json",
+           "echo x > ~/.claude/forcefield/state/spawn-x.json"):
+    assert _fs_bash(_c) is not None, f"write to a config sink must prompt: {_c}"
 assert _dispatch("echo x > ~/.claude/forcefield.json") == "ask"
 print("PASS: shell writes to security config are guarded on the Bash path")
 

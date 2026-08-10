@@ -165,7 +165,7 @@ The intrusiveness ladder, used by the config clamp: `deny > ask > redact > warn 
 
 | Decision | Meaning | Examples |
 |---|---|---|
-| **deny** | Zero-false-positive patterns, hard-blocked without a prompt | Relay/exfil domains, netcat, `/dev/tcp` reverse shell, fetch-piped-to-shell, `git clone ext::`, an unhardened `git clone` / `gh repo clone`, `rm -rf`, hex/octal obfuscation, escape techniques, high-confidence credentials in agent prompts, spawn rate limit |
+| **deny** | Zero-false-positive patterns, hard-blocked without a prompt | Relay/exfil domains, netcat, `/dev/tcp` reverse shell, fetch-piped-to-shell, `git clone ext::`, an unhardened `git clone` / `gh repo clone`, `rm -rf`, hex/octal obfuscation of a command name (an encoded quote — `\x27`, `\x22` — is dropped before the scan, since it hides nothing), escape techniques, high-confidence credentials in agent prompts, spawn rate limit |
 | **ask** | User must approve | Data POST, DNS-label exfil, metadata SSRF, scp/rsync/sftp, curl upload, typosquats, arbitrary-URL or plaintext-registry installs, credential-file reads, guarded write destinations, Sigma match, submodule RCE, git config RCE primitives, a clone that asks for submodules on purpose, agent injection or excessive privilege |
 | **redact** | Credential values replaced with `[REDACTED: pattern_name]` | High-confidence keys only, surrounding context preserved |
 | **warn** | Context injected via `systemMessage` | Credential-handling reminders, injection warnings on file reads, low-confidence alerts |

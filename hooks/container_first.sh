@@ -403,9 +403,25 @@ fi
 # like ${#arr[@]}, ${var##*/}, ${file%%.*} are NOT flagged: they
 # are common, legitimate shell, and hard-denying them (a deny,
 # not an ask) violated the zero-false-positive rule.
+#
+# An encoded QUOTE is dropped before the scan, and that is what keeps this
+# rung's zero-false-positive contract. \x27 and \x22 are how anyone writes a
+# quote they cannot type -- a one-liner nested inside $( ) inside a double
+# quoted string has no spelling left for a literal ' -- and the shipped log
+# caught exactly that: a `python3 -c` regex containing (?:\"|\x27) was DENIED
+# as an obfuscated command. It hid nothing. A command name is letters, so an
+# obfuscated `rm` must encode letters (\x72\x6d) and still matches here; a
+# payload that encodes only its quotes has encoded nothing worth reading.
+# Dropped textually rather than excluded in the pattern because the pattern is
+# an alternation of four escape syntaxes and each would need its own carve-out.
 # -----------------------------------------------------------
 
-if grep -qE '(\\x[0-9a-fA-F]{2}|\\[0-7]{3}|\\u00[0-7][0-9a-fA-F]|\\U000000[0-7][0-9a-fA-F])' <<<"$SCAN"; then
+ESCAPE_SCAN=$(printf '%s' "$SCAN" |
+  sed -e 's/\\x22//g' -e 's/\\x27//g' -e 's/\\042//g' -e 's/\\047//g' \
+    -e 's/\\u0022//g' -e 's/\\u0027//g' \
+    -e 's/\\U00000022//g' -e 's/\\U00000027//g')
+
+if grep -qE '(\\x[0-9a-fA-F]{2}|\\[0-7]{3}|\\u00[0-7][0-9a-fA-F]|\\U000000[0-7][0-9a-fA-F])' <<<"$ESCAPE_SCAN"; then
   emit_deny "obfuscation" $'BLOCKED: Obfuscated command detected (hex/octal escape sequences).\nIf this is legitimate, write it in plain text.'
 fi
 

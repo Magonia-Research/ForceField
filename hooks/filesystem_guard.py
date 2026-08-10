@@ -133,16 +133,63 @@ BASH_SINK_PATTERNS: dict[str, re.Pattern[str]] = {
     name: re.compile(src, re.IGNORECASE) for name, src in _BASH_SINK_SOURCES.items()
 }
 
-# Kept as a separate, deliberately simple membership test rather than one
+# Kept as separate, deliberately simple membership tests rather than one
 # correlated regex: two linear searches cannot backtrack against each other, and
 # this file's whole job is to be the thing that still works when something else
 # has gone wrong.
-_BASH_WRITE_VERB = re.compile(
-    r">>?|\btee\b|\bcp\b|\bmv\b|\bln\b|\binstall\b|\bdd\b|\bof="
-    r"|\btruncate\b|\bsed\b|\bpatch\b|\bprintf\b|\becho\b|\bcat\b"
+#
+# Split in two because the verb alone says nothing about which file is written.
+# These name their target as an argument, so the sink being in the same segment
+# is evidence.
+_BASH_TARGET_VERB = re.compile(
+    r"\btee\b|\bcp\b|\bmv\b|\bln\b|\binstall\b|\bdd\b|\bof="
+    r"|\btruncate\b|\bsed\b|\bpatch\b"
     r"|\bpython[0-9.]*\b|\bperl\b|\bruby\b|\bnode\b|\btouch\b|\bchmod\b",
     re.IGNORECASE,
 )
+
+# These write to a named path ONLY through a redirect, so their presence beside
+# a path is not evidence of anything. Keeping them in the one list is what made
+# `echo "== settings.json =="; jq . ~/.claude/settings.json` prompt: `echo`
+# matched as a write verb, the path matched anywhere on the line, and the two
+# were correlated across a `;` that separated a label from a read. `cat FILE`
+# had the same shape and was the read spelled most often.
+_BASH_REDIRECT_ONLY_VERB = re.compile(
+    r"\becho\b|\bprintf\b|\bcat\b", re.IGNORECASE,
+)
+
+
+# Where one path token ends. A sink pattern matches a SUFFIX of the path
+# (``.claude/settings.json`` out of ``~/.claude/settings.json``), so the redirect
+# operator is never adjacent to the match itself — the token has to be widened
+# leftward before anything can be said about what precedes it.
+_TOKEN_EDGE = frozenset(" \t\n;|&<>()\"'=")
+
+
+def _sink_is_written(command: str, start: int) -> bool:
+    """Whether the sink matched at ``start`` sits where this command WRITES it.
+
+    Two positions count: the object of a redirect, and an argument in the same
+    segment as a verb that names its own target. Anything else — a path read by
+    ``jq``, quoted inside an ``echo`` label, passed to ``grep`` — is a mention,
+    and prompting on a mention is what taught the operator to click through.
+
+    Segmentation is deliberately local and quote-blind. An over-split shortens
+    the segment, which can only ever LOSE a verb and turn an ask into a
+    stricter-looking miss on this line — so the failure direction is checked by
+    the redirect test, which runs first and does not depend on it.
+    """
+    token = start
+    while token > 0 and command[token - 1] not in _TOKEN_EDGE:
+        token -= 1
+    prefix = command[:token].rstrip()
+    if prefix.endswith((">", "<")):
+        return True
+    segment_start = 0
+    for index in range(token):
+        if command[index] in ";|&\n":
+            segment_start = index + 1
+    return _BASH_TARGET_VERB.search(command[segment_start:token]) is not None
 
 
 def check_bash_config_write(command: str) -> tuple[str, str] | None:
@@ -152,13 +199,21 @@ def check_bash_config_write(command: str) -> tuple[str, str] | None:
     Never a hard deny — a legitimate write to ForceField's own state and a
     hostile ``echo >`` are the same syscall, so the user is the only one who can
     tell them apart.
+
+    The sink has to be in a WRITE position, not merely present. Correlating any
+    write verb anywhere with any sink path anywhere is order-blind and
+    separator-blind, and it prompted on plain reads.
     """
-    if not command or not _BASH_WRITE_VERB.search(command):
+    if not command:
+        return None
+    if not (_BASH_TARGET_VERB.search(command)
+            or _BASH_REDIRECT_ONLY_VERB.search(command)
+            or ">" in command):
         return None
     for name, pattern in BASH_SINK_PATTERNS.items():
-        match = pattern.search(command)
-        if match:
-            return (name, match.group(0))
+        for match in pattern.finditer(command):
+            if _sink_is_written(command, match.start()):
+                return (name, match.group(0))
     return None
 
 # Credential stores read via the Read tool that the shared CREDENTIAL_ACCESS_PATTERNS
