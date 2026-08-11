@@ -240,8 +240,11 @@ for _guard, _fn, _cmd, _pattern in (
     # git version. This one is unconditionally ask on every machine.
     ("git_guard", run_git_guard, "git config core.hooksPath ./.evil-hooks",
      "git_config_rce_primitive"),
-    ("credential_access_guard", run_credential_access_guard, "cat .env",
-     "dotenv_file"),
+    # An SSH key rather than a .env, for the reason given at the passive case
+    # below: `.env` is naturally warn now, so it cannot demonstrate that config
+    # DOWNGRADED an ask.
+    ("credential_access_guard", run_credential_access_guard,
+     "cat ~/.ssh/id_rsa", "ssh_key"),
 ):
     drain()
     _resp = _with_home(warn_cfg(_guard), lambda f=_fn, c=_cmd: f(c))
@@ -566,8 +569,12 @@ for _guard, _fn, _ask_cmd, _deny_cmd in _PASSIVE_IN_PROC:
 
 # credential_access_guard's HARD_DENY_PATTERNS is empty, so it has no deny rung
 # to preserve -- passive takes its whole gating surface to warn.
+# An SSH key rather than a .env: `.env` is on the warn rung naturally now (see
+# credential_access_guard.WARN_PATTERNS), so it could no longer show that
+# passive CLAMPS an ask down to warn — it would pass while testing nothing.
 drain()
-_resp = _with_home(PASSIVE, lambda: run_credential_access_guard("cat .env"))
+_resp = _with_home(PASSIVE,
+                   lambda: run_credential_access_guard("head ~/.ssh/id_rsa"))
 _recs = drain()
 warn_shape(_resp, "credential_access_guard")
 warn_record(_recs, "credential_access_guard", natural="ask")

@@ -216,7 +216,7 @@ Reach for the narrowest relief: allowlist one pattern or path → soften one gua
 | `curl … \| sh` installer (rustup, nvm) | supply_chain_guard | **deny** | `permissive`, or `supply_chain_guard: ask` in **home** config |
 | Install from a plaintext `http://` index or registry | supply_chain_guard | ask | Verify the index is a trusted internal mirror, or use the default https one. `pipx install`, `uv pip install --require-hashes` and `pip install -e` do not exempt it |
 | `scp` / `rsync` / `curl -d` to your own host | exfil_guard | ask | Allowlist `remote_copy` / `curl_post_data`; relay domains stay denied |
-| Reading a project `.env` in dev | credential_access_guard | ask | Allowlist that path under `suppress_paths` |
+| Reading a project `.env` in dev | credential_access_guard | warn | Nothing to do — it is not blocked and needs no approval. The reminder tells the model to keep the values out of its reply, out of files it writes, and out of subagent prompts. Every other credential store still asks |
 | Fake keys in fixtures / `.env.example` | credential_guard | ask | Placeholders are already skipped; else `suppress_paths` |
 | Editing `~/.zshrc` / `~/.gitconfig` | filesystem_guard | ask | Allowlist the path, or disable for that project |
 | Shell write to `~/.claude/forcefield.json`, `settings.json`, anything under `~/.claude/forcefield/` | filesystem_guard | ask | Intentional: these decide what the guards do next, and cannot be suppressed |

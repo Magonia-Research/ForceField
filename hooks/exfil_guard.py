@@ -33,6 +33,36 @@ except Exception:  # pragma: no cover
     def in_redirect_or_exec_position(command: str, needle: str) -> bool:
         return True
 
+try:
+    from pathlib import Path
+
+    from hook_event import read_regular_text
+except Exception:  # pragma: no cover
+    # Same rule as above: without a way to read the repository's own origin,
+    # no push URL can be shown to be it, so every one keeps asking.
+    Path = None  # type: ignore[assignment]
+
+    def read_regular_text(path, limit):  # type: ignore[misc]
+        raise OSError("hook_event unavailable")
+
+# The repository's own config, read only when a push URL has already matched.
+_GIT_CONFIG_MAX_BYTES = 64 * 1024
+
+# URL-shaped tokens anywhere in the command. Deliberately not anchored to the
+# `git push` itself: a push spans a pipeline and a continuation, and an anchored
+# extractor that missed the URL would report "no candidates" — which confirms
+# the finding and asks, so being wrong here is being noisy, never silent.
+# Bounded runs AND a lookbehind pinning the start, which is the pair
+# ``supply_chain_guard.fetch_var_exec`` uses. Bounds alone were not enough: a
+# 64 KB base64 run is all word characters, so `[\w.-]{1,256}@` still scanned 256
+# of them from every one of 64K start positions before failing — 1.079 s against
+# a 0.75 s budget. ``(?<![\w.-])`` makes every position inside such a run fail
+# at the first step instead, because a URL token cannot begin mid-word.
+_PUSH_URL_TOKEN = re.compile(
+    r"(?<![\w.-])(?:(?:https?|ssh|git|ftps?)://[^\s'\"|;&]{1,512}"
+    r"|[\w.-]{1,256}@[\w.-]{1,256}:[^\s'\"|;&]{1,512})"
+)
+
 
 EXFIL_PATTERNS = {
     # A URL is a single whitespace-free token, so the gap between the scheme and
@@ -221,11 +251,102 @@ HARD_DENY_PATTERNS: frozenset[str] = frozenset([
 # stays the cheap candidate finder, and the confirmer decides whether the match
 # sits in a position that carries the meaning.
 #
-# Only deny-severity patterns are confirmed. An `ask` that fires on a mention is
-# noise the user can dismiss; a `deny` that fires on a mention is a wall.
+# Deny-severity patterns are confirmed because a false positive there is an
+# unappealable block. `git_push_url` is the one `ask` that carries a confirmer,
+# and it is not the "mention" case the paragraph above dismisses: the push is
+# real, and the only open question is whether the URL it names is the remote
+# this repository already pushes to. `git push origin` is silent, so
+# `git push <the same place, spelled out>` should be too — and it is exactly
+# what anyone types when SSH auth drops and they fall back to HTTPS.
 
 
-def _confirm_exfil_domain(text: str, matched: str) -> bool:
+def _git_url_identity(url: str) -> tuple[str, str] | None:
+    """``(host, path)`` for a git URL, with scheme and spelling normalised away.
+
+    ``git@github.com:Org/Repo.git`` and ``https://github.com/org/repo`` are the
+    same destination reached two ways, and the fallback that provokes this
+    finding is precisely a switch between them. Comparing raw strings would
+    therefore exempt nothing. Scheme is dropped for the same reason; the pair
+    that decides whether this is exfiltration is *where* and *which repo*.
+    """
+    text = url.strip().strip("'\"")
+    if not text:
+        return None
+    for scheme in ("https://", "http://", "ssh://", "git://", "ftp://", "ftps://"):
+        if text.lower().startswith(scheme):
+            text = text[len(scheme):]
+            break
+    else:
+        # scp-style: [user@]host:path, with no scheme and no leading slash.
+        if ":" not in text or text.startswith("/"):
+            return None
+    text = text.split("@", 1)[-1]
+    for separator in (":", "/"):
+        if separator in text:
+            host, _, path = text.partition(separator)
+            break
+    else:
+        return None
+    path = path.strip("/")
+    if path.lower().endswith(".git"):
+        path = path[:-4]
+    if not host or not path:
+        return None
+    return (host.lower(), path.lower())
+
+
+def _origin_identity(cwd: str | None) -> tuple[str, str] | None:
+    """``remote.origin.url`` for the repository at ``cwd``, normalised.
+
+    ``.git/config`` is a file inside the UNTRUSTED repository, so it is read
+    through ``read_regular_text`` like every other file a hook opens: a FIFO
+    left at that path would otherwise hang this guard to the kill with no
+    verdict delivered. A worktree or submodule spells ``.git`` as a file rather
+    than a directory; that reads as "no origin", which keeps the ask.
+    """
+    if not cwd:
+        return None
+    try:
+        config = Path(cwd) / ".git" / "config"
+        if not config.is_file():
+            return None
+        text = read_regular_text(config, _GIT_CONFIG_MAX_BYTES)
+    except (OSError, ValueError):
+        return None
+    in_origin = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_origin = stripped.replace(" ", "").lower().startswith('[remote"origin"]')
+            continue
+        if in_origin and stripped.lower().startswith("url"):
+            _, _, value = stripped.partition("=")
+            return _git_url_identity(value)
+    return None
+
+
+def _confirm_git_push_url(text: str, matched: str, cwd: str | None) -> bool:
+    """False when every URL pushed to is this repository's own ``origin``.
+
+    Deliberately origin and nothing else, which makes this exactly as strong as
+    ``git_push_non_origin``: pushing to a second configured remote by NAME
+    already asks, so exempting it by URL would be a hole that the named form
+    does not have. An attacker who repoints ``remote.origin.url`` is not helped
+    either — rewriting ``.git/config`` is itself gated by ``git_guard``.
+    """
+    origin = _origin_identity(cwd)
+    if origin is None:
+        return True
+    candidates = _PUSH_URL_TOKEN.findall(text)
+    if not candidates:
+        return True
+    for candidate in candidates:
+        if _git_url_identity(candidate) != origin:
+            return True
+    return False
+
+
+def _confirm_exfil_domain(text: str, matched: str, cwd: str | None = None) -> bool:
     """The blocklisted host must be an actual destination, not just present.
 
     The same hostname reads identically as a grep pattern, a `#` comment, a
@@ -235,7 +356,7 @@ def _confirm_exfil_domain(text: str, matched: str) -> bool:
     return addresses_domain(text, matched)
 
 
-def _confirm_reverse_shell(text: str, matched: str) -> bool:
+def _confirm_reverse_shell(text: str, matched: str, cwd: str | None = None) -> bool:
     """``/dev/tcp/`` is a network primitive only when something redirects to it."""
     return in_redirect_or_exec_position(text, matched)
 
@@ -243,21 +364,23 @@ def _confirm_reverse_shell(text: str, matched: str) -> bool:
 _POSITIONAL_CONFIRMERS = {
     "exfil_domains": _confirm_exfil_domain,
     "reverse_shell": _confirm_reverse_shell,
+    "git_push_url": _confirm_git_push_url,
 }
 
 
-def _confirmed(name: str, text: str, matched: str) -> bool:
+def _confirmed(name: str, text: str, matched: str,
+               cwd: str | None = None) -> bool:
     """Run ``name``'s positional confirmer, if it has one. Errors confirm."""
     confirmer = _POSITIONAL_CONFIRMERS.get(name)
     if confirmer is None:
         return True
     try:
-        return confirmer(text, matched)
+        return confirmer(text, matched, cwd)
     except Exception:  # noqa: BLE001 - a broken confirmer must not hide a match
         return True
 
 
-def check_command(command: str) -> tuple[str, str] | None:
+def check_command(command: str, cwd: str | None = None) -> tuple[str, str] | None:
     """Return (pattern_name, matched_text) or None.
 
     NEVER_ALLOWLIST patterns are checked before the allowlist, deny-severity
@@ -291,7 +414,7 @@ def check_command(command: str) -> tuple[str, str] | None:
         pattern = EXFIL_PATTERNS[name]
         for text in variants:
             match = pattern.search(text)
-            if match and _confirmed(name, text, match.group(0)):
+            if match and _confirmed(name, text, match.group(0), cwd):
                 return (name, match.group(0))
 
     if is_allowlisted(command):
@@ -302,7 +425,7 @@ def check_command(command: str) -> tuple[str, str] | None:
             continue
         for text in variants:
             match = pattern.search(text)
-            if match and _confirmed(name, text, match.group(0)):
+            if match and _confirmed(name, text, match.group(0), cwd):
                 return (name, match.group(0))
 
     return None

@@ -57,6 +57,7 @@ try:
     from credential_access_guard import check_command as cred_access_check  # noqa: E402
     from credential_access_guard import format_alert as cred_access_format  # noqa: E402
     from credential_access_guard import HARD_DENY_PATTERNS as CRED_ACCESS_HARD_DENY  # noqa: E402
+    from credential_access_guard import WARN_PATTERNS as CRED_ACCESS_WARN  # noqa: E402
     from allowlist import is_suppressed  # noqa: E402
     from filesystem_guard import check_bash_config_write as fs_bash_config_write  # noqa: E402
     from filesystem_guard import PATTERN_RISKS as FS_PATTERN_RISKS  # noqa: E402
@@ -233,6 +234,7 @@ def _run_simple_guard(
     format_fn,
     command: str,
     context: dict[str, object] | None = None,
+    warn_set=frozenset(),
 ) -> dict[str, object] | None:
     """Run a guard whose shape is "match, honor suppression, deny or ask".
 
@@ -251,7 +253,17 @@ def _run_simple_guard(
         _log_suppressed_allow(guard_name, pattern_name, command, context)
         return None
 
-    natural = "deny" if is_hard_deny else "ask"
+    if is_hard_deny:
+        natural = "deny"
+    elif pattern_name in warn_set:
+        # A rung below ask: no prompt, but the model is told what it is about to
+        # read and what not to do with it. For a file whose legitimate reads
+        # vastly outnumber the dangerous ones, interrupting every read buys
+        # nothing and costs attention, while the actual risk — the value landing
+        # in the transcript — is a handling instruction, not a permission.
+        natural = "warn"
+    else:
+        natural = "ask"
     return _finish(
         guard_name, natural, command, pattern_name,
         format_fn(pattern_name, matched_text), context,
@@ -261,9 +273,22 @@ def _run_simple_guard(
 def run_exfil_guard(
     command: str, context: dict[str, object] | None = None,
 ) -> dict[str, object] | None:
-    """Run exfil guard checks. Returns response dict or None."""
+    """Run exfil guard checks. Returns response dict or None.
+
+    ``exfil_check`` is wrapped rather than ``_run_simple_guard`` being widened:
+    one of exfil's confirmers needs the event's ``cwd`` to read the repository's
+    own ``remote.origin.url``, and the other three guards sharing that helper
+    need nothing of the sort. A closure keeps the shared contract at one
+    argument.
+    """
+    cwd = (context or {}).get("cwd")
+    cwd = cwd if isinstance(cwd, str) else None
+
+    def check(text: str):
+        return exfil_check(text, cwd)
+
     return _run_simple_guard(
-        "exfil_guard", exfil_check, EXFIL_HARD_DENY, exfil_format,
+        "exfil_guard", check, EXFIL_HARD_DENY, exfil_format,
         command, context,
     )
 
@@ -380,7 +405,7 @@ def run_credential_access_guard(
     """Run credential-file read guard checks. Returns response dict or None."""
     return _run_simple_guard(
         "credential_access_guard", cred_access_check, CRED_ACCESS_HARD_DENY,
-        cred_access_format, command, context,
+        cred_access_format, command, context, CRED_ACCESS_WARN,
     )
 
 

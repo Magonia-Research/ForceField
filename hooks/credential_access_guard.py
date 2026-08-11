@@ -74,9 +74,26 @@ CREDENTIAL_ACCESS_PATTERNS: dict[str, re.Pattern[str]] = {
     "terraform_state": re.compile(r"\.tfstate\b", re.IGNORECASE),
 }
 
-# All findings are "ask" — reading a credential file has legitimate uses, so a
-# hard block would violate the zero-false-positive rule.
+# Nothing here is a hard block — reading a credential file has legitimate uses,
+# so a deny would violate the zero-false-positive rule.
 HARD_DENY_PATTERNS: frozenset[str] = frozenset()
+
+# One rung below ask: no prompt, but the model is told what the file is and what
+# not to do with it.
+#
+# ``.env`` is the only member and the asymmetry is the point. Every other store
+# here holds nothing BUT authentication material, so a read of one is worth
+# stopping for. A ``.env`` is a project's ordinary configuration file that also
+# tends to hold secrets: grepping one variable out of it is routine, and the
+# measured prompts were exactly that — a price constant read from a carbon
+# ledger's ``factors.env``. Interrupting each of those buys nothing, because the
+# risk is not the read. It is the VALUE reaching the transcript, and that is a
+# handling instruction rather than a permission question.
+#
+# The read side keeps two other controls regardless: ``output_credential_scanner``
+# redacts credential values out of the result, and a per-project allowlist can
+# still suppress this entirely.
+WARN_PATTERNS: frozenset[str] = frozenset(["dotenv_file"])
 
 
 def check_command(command: str) -> tuple[str, str] | None:
@@ -120,8 +137,31 @@ PATTERN_RISKS = {
 
 
 def format_alert(pattern_name: str, matched_text: str) -> str:
-    """Build the ask-reason message for a credential-file read."""
+    """Build the reason text for a credential-file read.
+
+    A ``WARN_PATTERNS`` member is addressed to the model rather than to the
+    user: nothing is being approved, so "before approving" would be advice
+    nobody is in a position to take. What it needs instead is what to do with
+    what it is about to see.
+    """
     risk = PATTERN_RISKS.get(pattern_name, "Reading a credential store")
+    if pattern_name in WARN_PATTERNS:
+        return (
+            f"CREDENTIAL ACCESS GUARD: {pattern_name} (not blocked)\n\n"
+            f"Matched: {matched_text[:120]}\n"
+            f"Risk: {risk}\n\n"
+            "This command reads a .env file. It is not being stopped, and it "
+            "does not need approval.\n\n"
+            "Handle the contents as secrets:\n"
+            "- Do NOT echo, print, cat or otherwise reproduce any value from "
+            "it in your reply, in a summary, or in a file you write.\n"
+            "- Do NOT pass a value from it into a subagent prompt, a URL, a "
+            "commit message, or a tool argument.\n"
+            "- Refer to variables by NAME ($API_KEY, ${DATABASE_URL}), never "
+            "by value; use a placeholder if you must show a line.\n"
+            "- Read only the key you actually need. If you only need to know "
+            "whether a variable is set, test for it rather than printing it."
+        )
     msg = f"CREDENTIAL ACCESS GUARD: {pattern_name}\n\n"
     msg += f"Matched: {matched_text[:120]}\n"
     msg += f"Risk: {risk}\n\n"
