@@ -312,6 +312,33 @@ def split_segments(command: str):
         return [command]
 
 
+_REDIRECT_CHARS = frozenset(["<", ">"])
+
+
+def mask_quoted_redirects(command: str) -> str:
+    """``command`` with every QUOTED ``<``/``>`` replaced by a space.
+
+    A redirect is an operator; the same character inside quotes is just a
+    character. Length and every other byte are preserved, so a caller keeps its
+    own regexes and still reads real targets — including quoted ones — straight
+    out of the result.
+
+    Written for the write ledger, which scanned raw text and so read the closing
+    bracket of an HTML-stripping regex as a redirect: ``re.sub(r'<[^>]+>','',t)``
+    produced a "target" of ``,'',t,flags=re.S``. An escaped ``\\>`` is masked
+    too, which is correct — the shell treats it as a literal as well.
+    """
+    try:
+        unquoted = {index for index, char in _scan_unquoted(command)
+                    if char in _REDIRECT_CHARS}
+        return "".join(
+            " " if char in _REDIRECT_CHARS and index not in unquoted else char
+            for index, char in enumerate(command)
+        )
+    except Exception:  # noqa: BLE001 - fail toward the caller's prior behaviour
+        return command
+
+
 def tokenize(segment: str):
     """Split a segment into shell words, dropping the quotes around them."""
     try:
@@ -340,9 +367,15 @@ def _command_words(segment: str):
 
 
 def leading_command(segment: str) -> str:
-    """Return the basename of the command a segment invokes, or ``""``."""
+    """Return the basename of the command a segment invokes, or ``""``.
+
+    Leading ``(`` and ``{`` are stripped first. They open a subshell or a group,
+    so ``(curl -sSL URL | sh)`` invokes ``curl`` exactly as the unparenthesised
+    form does -- but shlex keeps the bracket attached to the word, and a caller
+    comparing against a set of tool names would read ``(curl`` and find nothing.
+    """
     try:
-        words = _command_words(segment)
+        words = _command_words(segment.lstrip("({ \t"))
         return words[0].rsplit("/", 1)[-1] if words else ""
     except Exception:  # noqa: BLE001
         return ""

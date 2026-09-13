@@ -34,6 +34,12 @@ except Exception:  # pragma: no cover
         return True
 
 try:
+    from patterns import longest_unspaced_run
+except Exception:  # pragma: no cover
+    def longest_unspaced_run(value: str) -> str:
+        return value
+
+try:
     from pathlib import Path
 
     from hook_event import read_regular_text
@@ -325,7 +331,8 @@ def _origin_identity(cwd: str | None) -> tuple[str, str] | None:
     return None
 
 
-def _confirm_git_push_url(text: str, matched: str, cwd: str | None) -> bool:
+def _confirm_git_push_url(text: str, matched: str, cwd: str | None = None,
+                          raw: str | None = None) -> bool:
     """False when every URL pushed to is this repository's own ``origin``.
 
     Deliberately origin and nothing else, which makes this exactly as strong as
@@ -346,7 +353,8 @@ def _confirm_git_push_url(text: str, matched: str, cwd: str | None) -> bool:
     return False
 
 
-def _confirm_exfil_domain(text: str, matched: str, cwd: str | None = None) -> bool:
+def _confirm_exfil_domain(text: str, matched: str, cwd: str | None = None,
+                          raw: str | None = None) -> bool:
     """The blocklisted host must be an actual destination, not just present.
 
     The same hostname reads identically as a grep pattern, a `#` comment, a
@@ -356,28 +364,252 @@ def _confirm_exfil_domain(text: str, matched: str, cwd: str | None = None) -> bo
     return addresses_domain(text, matched)
 
 
-def _confirm_reverse_shell(text: str, matched: str, cwd: str | None = None) -> bool:
+def _confirm_reverse_shell(text: str, matched: str, cwd: str | None = None,
+                           raw: str | None = None) -> bool:
     """``/dev/tcp/`` is a network primitive only when something redirects to it."""
     return in_redirect_or_exec_position(text, matched)
+
+
+_NETWORK_TOOLS = frozenset(["curl", "wget", "nc", "ncat"])
+
+
+def _confirm_pipe_to_network(text: str, matched: str, cwd: str | None = None,
+                             raw: str | None = None) -> bool:
+    """The fetcher must be a command word, not a longer word after a ``|``.
+
+    ``pipe_to_network`` is two characters of pattern — a pipe and a tool name —
+    and it had neither a right-hand word boundary nor any notion of quoting, so
+    both halves could be something else entirely. Measured on this repository's
+    own source:
+
+        grep -n "base64_in_url\\|curl_cmdsubst_url" -A 25 hooks/exfil_guard.py | head
+
+    The ``|`` is a grep alternation inside a quoted argument and ``curl`` is the
+    first five letters of a pattern NAME, and that asked. ``ncdu``, ``wgetrc``
+    and a file called ``curl-notes.md`` are the same shape.
+
+    Splitting the command the way the shell does answers both at once: a
+    quoted ``|`` is not a separator, and a segment's command word is compared
+    whole, so ``curl_cmdsubst_url`` is not ``curl``. Env assignments and
+    transparent wrappers are skipped, so ``cat f | sudo curl -d @- URL`` still
+    confirms.
+
+    Asked of the RAW command, never of a normalized variant, because this is a
+    question about shell STRUCTURE and normalization dissolves the quotes that
+    structure is made of: ``rg -e 'wget|curl' docs/ | head`` normalizes to
+    ``rg -e wget|curl docs/ | head``, where the alternation has become a pipe
+    and ``curl docs/`` has become a command. Obfuscation is still caught,
+    because the raw split is tokenized by ``shlex`` — ``\\curl`` and ``c'u'rl``
+    both come back as ``curl``.
+    """
+    try:
+        from shell_context import leading_command, split_segments
+    except Exception:  # noqa: BLE001 - anchoring is an FP fix, never a gate
+        return True
+    return any(leading_command(segment) in _NETWORK_TOOLS
+               for segment in split_segments(raw if raw is not None else text))
+
+
+# The floor ``base64_in_url`` matches on, and the run it matched. This pattern
+# begins at the scheme and its ``[^\s]{0,2048}?`` prefix may swallow whole query
+# parameters, so the blob is the run at the END of the match and nowhere else —
+# splitting the match on its first ``=`` handed the confirmer the rest of the
+# URL, which cleared nothing because a URL has no encoded spaces in it. Anchored
+# here rather than captured in the pattern because a confirmer is handed the
+# matched TEXT, not the match object.
+_BASE64_URL_FLOOR = 40
+_BASE64_URL_RUN = re.compile(r"=([A-Za-z0-9+/]{40,4096})={0,2}$")
+
+
+def _confirm_base64_in_url(text: str, matched: str, cwd: str | None = None,
+                           raw: str | None = None) -> bool:
+    """The query value must still be a blob once ``+`` reads as the space it is.
+
+    A literature search is 50 characters of pure base64 alphabet and carries
+    nothing: ``?query.bibliographic=Gelman+Loken+Garden+of+Forking+Paths`` and
+    ``?q=handbook+mathematical+psychology+luce+bush+galanter`` both asked, and
+    over three days of shipped log this shape was every match this pattern made
+    but one.
+    """
+    run = _BASE64_URL_RUN.search(matched)
+    if run is None:
+        return True
+    return len(longest_unspaced_run(run.group(1))) >= _BASE64_URL_FLOOR
+
+
+# Command words that report host state. A substitution led by one of these is
+# putting something the command line does NOT already show into the URL, which
+# is the whole finding. Text-processing verbs are here too: given no file
+# argument each reads the enclosing stdin, so "only literal arguments" does not
+# make them literal.
+_STATE_READING = frozenset([
+    "cat", "head", "tail", "less", "more", "strings", "xxd", "od", "base64",
+    "env", "printenv", "set", "export", "id", "whoami", "groups", "hostname",
+    "uname", "pwd", "date", "ls", "find", "stat", "grep", "egrep", "rg", "sed",
+    "awk", "cut", "tr", "sort", "uniq", "wc", "jq", "yq", "git", "openssl",
+    "gpg", "security", "defaults", "keychain", "curl", "wget", "ssh", "scp",
+    "aws", "gcloud", "az", "kubectl", "docker", "container", "pbpaste",
+    "history", "ps", "who", "w", "last", "dscl", "launchctl", "systemctl",
+])
+
+# A whole substitution body, and nothing looser: one bare command word followed
+# by arguments that are ALL fully quoted. Accepting only that shape is what
+# makes the operator question moot -- there is no unquoted text left in the body
+# to hold a pipe, a redirect or a second command.
+_LITERAL_SUBST = re.compile(
+    r"^\s*(?P<verb>[A-Za-z_][\w.-]*)"
+    r"(?P<args>(?:\s+(?:'[^']*'|\"[^\"]*\"))+)\s*$"
+)
+_DOUBLE_QUOTED = re.compile(r"\"[^\"]*\"")
+_MAX_SUBSTITUTIONS = 32
+
+
+def _substitution_bodies(text: str):
+    """Yield ``(offset, body)`` for each ``$( )`` / backtick substitution.
+
+    Paren-balanced and quote-aware, because the bodies that matter are not
+    simple ones: ``$(enc 'File:FAA radar (Bennett, Colorado).JPG')`` closes on
+    a parenthesis inside its own quoted argument if you match lazily, and on
+    nothing at all if you forbid parens in the body.
+
+    Always walked from the start of the command and filtered by offset
+    afterwards, never from a slice: a match can begin inside a ``sh -c '…'``
+    body, and a slice taken there opens mid-quote with every quote state after
+    it inverted.
+    """
+    index, length, found = 0, len(text), 0
+    while index < length and found < _MAX_SUBSTITUTIONS:
+        char = text[index]
+        if char == "`":
+            end = text.find("`", index + 1)
+            if end < 0:
+                return
+            yield index, text[index + 1:end]
+            found += 1
+            index = end + 1
+            continue
+        if char != "$" or not text.startswith("$(", index):
+            index += 1
+            continue
+        cursor, depth, in_single, in_double = index + 2, 1, False, False
+        while cursor < length and depth:
+            current = text[cursor]
+            if in_single:
+                in_single = current != "'"
+            elif current == "\\":
+                cursor += 1
+            elif in_double:
+                in_double = current != '"'
+            elif current == "'":
+                in_single = True
+            elif current == '"':
+                in_double = True
+            elif current == "(":
+                depth += 1
+            elif current == ")":
+                depth -= 1
+            cursor += 1
+        if depth:
+            return
+        yield index, text[index + 2:cursor - 1]
+        found += 1
+        index = cursor
+
+
+def _substitution_is_literal(body: str) -> bool:
+    """True when a substitution body can only emit what it already shows.
+
+    ``$(enc 'File:KSC-03PD-3300.jpg')`` hands a helper a string that is already
+    written on the command line, so nothing reaches the wire that was not
+    already there to read. ``$(cat ~/.ssh/id_rsa)``, ``$(id)`` and
+    ``$(printf '%s' "$TOKEN")`` are the finding this pattern is named for.
+
+    Three conditions, each about what the body can REACH rather than what it is
+    called: the shape above (a verb and quoted arguments only), no expansion
+    left inside those quotes — single quotes are inert, double quotes are not —
+    and a verb that does not read host state. A verb with no arguments at all
+    fails the shape, which is deliberate: ``id`` and ``whoami`` are exactly
+    that.
+    """
+    match = _LITERAL_SUBST.match(body)
+    if not match:
+        return False
+    if match.group("verb").lower() in _STATE_READING:
+        return False
+    return not any(
+        "$" in span or "`" in span
+        for span in _DOUBLE_QUOTED.findall(match.group("args"))
+    )
+
+
+def _confirm_curl_cmdsubst_url(text: str, matched: str, cwd: str | None = None,
+                               raw: str | None = None) -> bool:
+    """At least one substitution has to be able to carry something out.
+
+    The pattern stops at the opening ``$(``, so the bodies sit at or past the
+    match. A body this cannot parse yields nothing and the finding stands.
+    """
+    position = text.find(matched)
+    if position < 0:
+        return True
+    bodies = [body for offset, body in _substitution_bodies(text)
+              if offset >= position]
+    if not bodies:
+        return True
+    return not all(_substitution_is_literal(body) for body in bodies)
 
 
 _POSITIONAL_CONFIRMERS = {
     "exfil_domains": _confirm_exfil_domain,
     "reverse_shell": _confirm_reverse_shell,
     "git_push_url": _confirm_git_push_url,
+    "pipe_to_network": _confirm_pipe_to_network,
+    "base64_in_url": _confirm_base64_in_url,
+    "curl_cmdsubst_url": _confirm_curl_cmdsubst_url,
 }
 
 
 def _confirmed(name: str, text: str, matched: str,
-               cwd: str | None = None) -> bool:
-    """Run ``name``'s positional confirmer, if it has one. Errors confirm."""
+               cwd: str | None = None, raw: str | None = None) -> bool:
+    """Run ``name``'s positional confirmer, if it has one. Errors confirm.
+
+    ``text`` is the variant the match came from; ``raw`` is the command as the
+    user wrote it. A confirmer asking about POSITION wants ``text`` — that is
+    where its match lives. A confirmer asking about shell STRUCTURE wants
+    ``raw``, because a normalized variant has had its quotes dissolved and can
+    show a pipe or a command word that the shell would never see.
+    """
     confirmer = _POSITIONAL_CONFIRMERS.get(name)
     if confirmer is None:
         return True
     try:
-        return confirmer(text, matched, cwd)
+        return confirmer(text, matched, cwd, raw)
     except Exception:  # noqa: BLE001 - a broken confirmer must not hide a match
         return True
+
+
+_MAX_MATCHES_PER_PATTERN = 16
+
+
+def _first_confirmed(name: str, variants: tuple[str, ...],
+                     cwd: str | None) -> tuple[str, str] | None:
+    """The first match of ``name`` that survives its confirmer, or None.
+
+    Every match is offered, not just the first. A confirmer answers a question
+    about one match's position, so a cleared match says nothing about the next
+    one — and with ``search`` the first benign hit hid every later hit in the
+    same command. One URL carrying a search phrase and a real payload
+    (``?q=two+words+of+prose&d=<blob>``) is that case exactly.
+    """
+    pattern = EXFIL_PATTERNS[name]
+    raw = variants[0] if variants else ""
+    for text in variants:
+        for index, match in enumerate(pattern.finditer(text)):
+            if index >= _MAX_MATCHES_PER_PATTERN:
+                break
+            if _confirmed(name, text, match.group(0), cwd, raw):
+                return (name, match.group(0))
+    return None
 
 
 def check_command(command: str, cwd: str | None = None) -> tuple[str, str] | None:
@@ -411,22 +643,19 @@ def check_command(command: str, cwd: str | None = None) -> tuple[str, str] | Non
     never_ask = [n for n in EXFIL_PATTERNS if n in NEVER_ALLOWLIST
                  and n not in HARD_DENY_PATTERNS]
     for name in never_deny + never_ask:
-        pattern = EXFIL_PATTERNS[name]
-        for text in variants:
-            match = pattern.search(text)
-            if match and _confirmed(name, text, match.group(0), cwd):
-                return (name, match.group(0))
+        found = _first_confirmed(name, variants, cwd)
+        if found:
+            return found
 
     if is_allowlisted(command):
         return None
 
-    for name, pattern in EXFIL_PATTERNS.items():
+    for name in EXFIL_PATTERNS:
         if name in NEVER_ALLOWLIST:
             continue
-        for text in variants:
-            match = pattern.search(text)
-            if match and _confirmed(name, text, match.group(0), cwd):
-                return (name, match.group(0))
+        found = _first_confirmed(name, variants, cwd)
+        if found:
+            return found
 
     return None
 

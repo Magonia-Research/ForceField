@@ -647,3 +647,32 @@ def looks_encoded(blob: str) -> bool:
         and any(c.islower() for c in blob)
         and any(c.isdigit() for c in blob)
     )
+
+
+# In a URL query string ``+`` IS a space — that is what the form-encoding says it
+# is — and ``%20`` is the same space spelled the other way.
+_QUERY_SPACE = re.compile(r"\+|%20", re.IGNORECASE)
+
+
+def longest_unspaced_run(value: str) -> str:
+    """The longest stretch of ``value`` that carries no encoded space.
+
+    Every long-value detector here is a character-class run with a length floor,
+    and ``+`` is inside every one of those character classes — so an ordinary
+    search phrase is indistinguishable from a payload by the floor alone.
+    ``?query.bibliographic=Gelman+Loken+Garden+of+Forking+Paths`` is 45
+    characters drawn entirely from the base64 alphabet and says exactly what it
+    appears to say. Reading the encoded space back BEFORE applying the floor is
+    what separates the two: a phrase collapses into words, and a payload does
+    not, because base64 has no spaces in it to decode.
+
+    Deliberately the whole test. Pairing it with ``looks_encoded`` was tried and
+    reverted: that predicate wants upper, lower AND a digit, so it cleared
+    ``?d=`` followed by sixty ``A``s and every lowercase hex digest — real
+    detections, given up to answer a question about spaces.
+
+    Correctly-encoded base64 never loses by this, because a raw ``+`` in a query
+    value would decode to a space and corrupt the blob: the wire spellings are
+    ``%2B`` and base64url's ``-``, neither of which splits a run.
+    """
+    return max(_QUERY_SPACE.split(value), key=len, default="")

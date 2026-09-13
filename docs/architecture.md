@@ -57,6 +57,7 @@ SessionStart ──► hooks/sigma_update.sh          (24h cooldown via stamp fi
                           └─► ~/.claude/forcefield/sigma/rules.json    (106 rules)
                                  │
 PreToolUse[Bash] ──► hooks/sigma_engine.py  (stdlib only) ──► ask on match
+                          (2 rule ids skipped at load; 1 refined by position)
 ```
 
 If the compiled rules are absent the engine silently no-ops, so the plugin works without ever

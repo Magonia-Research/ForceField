@@ -194,6 +194,53 @@ PLAIN_BENIGN = (
      "git -c core.hooksPath=/dev/null clone --no-recurse-submodules https://x/y"),
     ("hardened-clone-gh",
      "gh repo clone o/r -- --config core.hooksPath=/dev/null --no-recurse-submodules"),
+    # Literature and archive research: three days of shipped log, 80-odd
+    # prompts, not one of them carrying anything out. Each is here as measured,
+    # because the shapes are what made them false -- `+` is a space in a query
+    # string, a fetch piped into an interpreter with its own program is a parse,
+    # and a quoted `|` is not a pipe.
+    ("crossref-search",
+     "container run --rm curlimages/curl:latest -sS 'https://api.crossref.org/works"
+     "?query.bibliographic=Gelman+Loken+Garden+of+Forking+Paths&rows=3'"),
+    ("archive-search",
+     "container run --rm curlimages/curl:latest -sS 'https://archive.org/advancedsearch.php"
+     "?q=handbook+mathematical+psychology+luce+bush+galanter&rows=30&output=json'"),
+    ("unpaywall-then-parse",
+     "container run --rm img sh -c '\n"
+     "for doi in \"10.1121/1.1907783\" \"10.1037/h0031246\"; do\n"
+     "  curl -s \"https://api.unpaywall.org/v2/${doi}?email=a@b.c\" | python3 -c \"\n"
+     "import json,sys\nprint(json.load(sys.stdin).get('is_oa'))\n\"\n"
+     "  echo;\ndone\n'"),
+    ("fetch-then-parse-html",
+     "container run --rm curlimages/curl:latest -sSL 'https://www.example.org/index.html'"
+     " 2>/dev/null | python3 -c \"\nimport sys,re\nprint(len(sys.stdin.read()))\n\""
+     " 2>&1 | head -40"),
+    ("wikimedia-titles-urlencoded",
+     "enc(){ python3 -c \"import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))\" \"$1\"; }\n"
+     "container run --rm -v \"$O/_meta\":/out curlimages/curl:latest -sS -o /out/info.json"
+     " \"https://commons.wikimedia.org/w/api.php?action=query&titles="
+     "$(enc 'File:FAA radar (Bennett, Colorado).JPG|File:AirTraffic-8.jpg')\""),
+    ("download-then-load-json",
+     "g(){ container run --rm -v \"$O\":/out curlimages/curl:latest -sS -o \"/out/$1\""
+     " \"https://commons.wikimedia.org/w/api.php?gscoord=$2\" 2>/dev/null | tail -1; }\n"
+     "g geo.json \"32.83|-97.06\"\n"
+     "python3 -c \"import json; print(json.load(open('geo.json')))\""),
+    # Reading this repository's own source. Both halves of the pipe-to-shell
+    # deny fired on these: `(fet''ch` as a command position, and a quoted
+    # alternation as a pipe.
+    ("grep-alternation-guard-names",
+     'grep -n "base64_in_url\\|curl_cmdsubst_url" -A 25 hooks/exfil_guard.py | head -80'),
+    ("grep-alternation-then-interp",
+     'python3 tests/test_plugin.py 2>&1 | grep -E "PASS: (fet' + 'ch|pipe)|FAIL" | head'),
+    # Text processing whose literals are unprintable or non-ASCII bytes. None of
+    # these can spell a command word, and all of them were hard denies.
+    ("nul-normalise", "python3 -c \"t = open('x.txt').read().replace('\\x00', ' ')\""),
+    ("ansi-strip", "sed -e 's/\\x1b\\[[0-9;]*m//g' out.txt"),
+    ("jpeg-marker-walk", "python3 -c \"m in (b'\\xc0', b'\\xc1', b'\\xcf')\""),
+    # A host whose name merely contains a dotfile's name.
+    ("navy-history-fetch",
+     "container run --rm img sh -c 'curl -sSL -o /out/danfs.html"
+     " \"https://www.history.navy.mil/research/histories/danfs/n/new-mexico-i.html\"'"),
 )
 
 

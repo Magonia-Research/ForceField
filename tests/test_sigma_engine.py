@@ -26,7 +26,9 @@ HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
 GUARD = str(HOOKS_DIR / "sigma_engine.py")
 
 sys.path.insert(0, str(HOOKS_DIR))
-from sigma_engine import RULES_PATH  # noqa: E402
+from sigma_engine import (  # noqa: E402
+    _DISABLED_RULE_IDS, _REFINEMENTS, RULES_PATH,
+)
 
 # The compiled ruleset lives outside the repo under $HOME, which _isolated_home has
 # just diverted -- without this the match-expecting cases would silently skip. The
@@ -194,10 +196,74 @@ def check_mutation_gaps():
     if "Synthetic med" not in _reason(out):
         failures.append("default floor must keep medium rules active")
 
+    # A disabled rule id never speaks, however well it matches. The set exists
+    # because a Sigma rule written for human-operated endpoints can describe
+    # normal agent behaviour: "Terminate Linux Process Via Kill" fired 13 times
+    # in the shipped log, every one of them the session killing its own
+    # background job. Driven through a synthetic rule carrying the real id, so
+    # the assertion is about the filter and not about a SigmaHQ commit. Every
+    # id in the set is exercised, so adding one without a reason is visible.
+    live = _synthetic_rule("live", "high")
+    for disabled_id in sorted(_DISABLED_RULE_IDS):
+        dead = _synthetic_rule("dead", "high")
+        dead["id"] = disabled_id
+        dead["title"] = "Disabled By Id"
+        out = run_with_rules([dead], "sigmaprobe --run")
+        if out:
+            failures.append("disabled id %s still alerted: %s"
+                            % (disabled_id[:8], _reason(out)[:60]))
+        # ...and the filter must remove that id only, not empty the ruleset.
+        out = run_with_rules([dead, live], "sigmaprobe --run")
+        if "Disabled By Id" in _reason(out):
+            failures.append("disabled rule %s spoke alongside a live one"
+                            % disabled_id[:8])
+        if "Synthetic live" not in _reason(out):
+            failures.append("the disable filter took a live rule with it")
+
+    failures.extend(check_refinements())
+
     for line in failures:
         print("  FAIL  %s" % line)
     if not failures:
-        print("  PASS  sigma match-cap and severity floor are enforced")
+        print("  PASS  sigma match-cap, severity floor, disables and refinements hold")
+    return failures
+
+
+def check_refinements():
+    """A refined rule keeps its coverage and drops the position it never meant.
+
+    Sigma's ``contains`` cannot say WHERE a string counts, and for a filename it
+    has to: ``.history`` matched every host under a ``history.`` domain, so
+    fetching ``https://www.history.navy.mil/...`` reported a shell-history read
+    six times in three days of shipped log. Asserted through the real compiled
+    ruleset rather than a synthetic, because the refinement is keyed to a real
+    SigmaHQ id and a synthetic would only test that a dict lookup works.
+    """
+    failures = []
+    if not RULES_PATH.exists():
+        return failures
+    history_id = "508a9374-ad52-4789-b568-fc358def2c65"
+    if history_id not in _REFINEMENTS:
+        return ["the history-file refinement is gone; its false positive is not"]
+    rules = [r for r in json.loads(RULES_PATH.read_text()).get("rules", [])
+             if r.get("id") == history_id]
+    if not rules:
+        return failures  # the ruleset predates this rule; nothing to assert
+    for command in (
+        'curl -sSL -o /out/danfs.html "https://www.history.navy.mil/research/x.html"',
+        "curl -sS https://history.army.mil/Portals/143/72-6.pdf -o /out/72-6.pdf",
+        "openssl s_client -connect www.history.navy.mil:443 2>/dev/null",
+    ):
+        if run_with_rules(rules, command):
+            failures.append("a hostname read as a history file: %s" % command[:60])
+    for command in (
+        "grep -n pandoc ~/.zsh_history | tail -20",
+        "cat /home/u/.bash_history",
+        "wc -l ~/.history",
+        "tail -5 ~/.local/share/fish/fish_history",
+    ):
+        if not run_with_rules(rules, command):
+            failures.append("a real history-file read stopped alerting: %s" % command[:60])
     return failures
 
 

@@ -72,6 +72,34 @@ def compile_re(pattern):
     return re.compile(pattern, re.IGNORECASE)
 
 
+# SigmaHQ rules this plugin does not run.
+#
+# A Sigma rule is written for a fleet of human-operated endpoints, and two of
+# its assumptions are false here: that a shell command is typed by a person, and
+# that the three facts a rule correlates arrived independently. Claude Code
+# breaks both -- it starts and stops its own background jobs, and `sh -c` inside
+# a container is how it spells every command.
+#
+# Filtered at load rather than dropped in `sigma_compiler.py` so it takes effect
+# immediately, instead of waiting out the 24h `sigma_update.sh` cooldown, and so
+# it survives the recompile that cooldown eventually runs.
+_DISABLED_RULE_IDS = frozenset({
+    # Terminate Linux Process Via Kill. Measured in the shipped log: all 13
+    # matches were `pkill -f <the session's own fetch script>`, none real.
+    "64c41342-6b27-523b-5d3f-c265f3efcdb3",
+    # Suspicious Download and Execute Pattern via Curl/Wget. Three `contains`
+    # selections ANDed: a fetcher, a `/tmp/` or `/dev/shm/` path, and `sh -c`.
+    # Every containerized fetch satisfies all three by construction -- the
+    # session scratchpad IS under /tmp, and `container run … sh -c '…'` supplies
+    # the rest -- so the rule reports the shape rather than the correlation it
+    # is named for. It never sees whether the thing fetched is the thing run.
+    # 11 asks in three days of shipped log, no true positives. Not a coverage
+    # loss: `supply_chain_guard.fetch_then_exec` and `pipe_to_shell` decide that
+    # question on a filename, which is what the rule only approximates.
+    "a2d9e2f3-0f43-4c7a-bcd9-9acfc0d723aa",
+})
+
+
 def load_rules():
     """Load compiled sigma rules from JSON.
 
@@ -94,7 +122,10 @@ def load_rules():
     if not isinstance(data, dict):
         return []
     rules = data.get("rules", [])
-    return rules if isinstance(rules, list) else []
+    if not isinstance(rules, list):
+        return []
+    return [r for r in rules
+            if not (isinstance(r, dict) and r.get("id") in _DISABLED_RULE_IDS)]
 
 
 def extract_image(command):
@@ -241,6 +272,36 @@ def evaluate_selection(selection, command, image):
     return False
 
 
+# A second question asked of a rule that has already matched, for the case where
+# the rule is right about WHAT to look for and has no way to say WHERE it counts.
+# Disabling such a rule throws away real coverage; this keeps it and adds the
+# position test Sigma's `contains` cannot express.
+#
+# `.history` is a filename. Sigma matches it as a substring, so every host under
+# a `history.` domain matched it too: `https://www.history.navy.mil/...` asked
+# six times in three days of shipped log, on plain archive fetches. What makes a
+# dotfile a filename is what sits before the dot -- a `/`, or nothing at all. A
+# WORD character there means the dot is a separator inside a longer name, which
+# is a DNS label (`www.history.navy.mil`) and never a path.
+_REFINEMENTS = {
+    "508a9374-ad52-4789-b568-fc358def2c65": re.compile(  # Shell history files
+        r"(?<![\w.])\.(?:bash_|zsh_|sh_|z)?history\b"
+        r"|(?<![\w.])fish_history\b"
+    ),
+}
+
+
+def _refined(rule_id, command):
+    """False when a matched rule's own position test rejects the command."""
+    refinement = _REFINEMENTS.get(rule_id)
+    if refinement is None:
+        return True
+    try:
+        return bool(refinement.search(command))
+    except Exception:  # noqa: BLE001 - a broken refinement must not hide a match
+        return True
+
+
 def evaluate_rule(rule, command, image):
     """Evaluate a single rule against the command.
 
@@ -308,7 +369,7 @@ def evaluate_rule(rule, command, image):
     if filter_results and any(filter_results.values()):
         return False
 
-    return True
+    return _refined(rule.get("id"), command)
 
 
 MITRE_TACTIC_NAMES = {

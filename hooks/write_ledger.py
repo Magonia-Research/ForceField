@@ -370,6 +370,14 @@ def correlate(session_id: str | None, path: str,
 # repository, both of which are full of exfil strings by construction.
 _REDIRECT_TARGET = re.compile(r">>?\s*([^\s;|&<>()]+)")
 _OUTPUT_FLAG = re.compile(r"(?:^|\s)(?:-o|--output(?:=|\s+))\s*([^\s;|&<>()]+)")
+# ``-o`` only names an output file for the tool that was in mind when this flag
+# was added. It means "print only the match" to grep, and `grep -o 'Record/[0-9]*'`
+# duly filed ``<cwd>/Record/[0-9]*`` as a path that command would write. The flag
+# is therefore read only in a segment that also names a downloader — which is
+# every case it was written for, ``curl -o`` and ``wget -O``, including the
+# ``container run … curlimages/curl:latest -o …`` spelling where the fetcher is
+# not the leading word.
+_DOWNLOADER = re.compile(r"\b(?:curl|wget|aria2c|yt-dlp|youtube-dl)\b")
 
 
 def extract_targets(command: str, cwd: str | None = None) -> list[str]:
@@ -378,27 +386,45 @@ def extract_targets(command: str, cwd: str | None = None) -> list[str]:
     Heredoc bodies and comments are stripped first, so the ``PY`` payload of
     ``cat > x.py <<'PY'`` cannot contribute targets of its own — the body is
     data being written, not a command that writes.
+
+    Quoted redirect characters are masked first, because a ``>`` inside quotes
+    is a character and not an operator. Scanning raw text read the closing
+    bracket of an HTML-stripping regex as a redirect: ``re.sub(r'<[^>]+>','',t)``
+    yielded the "target" ``<cwd>/,'',t,flags=re.S``, and ``grep -o 'Record/[0-9]*'``
+    yielded ``<cwd>/]*``. Junk in the ledger is not inert. Both sides of a
+    correlation run this same extractor, so two commands carrying the same
+    ordinary Python idiom produced the same junk path and correlated with each
+    other — 20 bypass warnings in three days of shipped log, every one of them a
+    regex recognising itself.
     """
     if not command:
         return []
     try:
-        from shell_context import strip_comments, strip_heredocs  # noqa: PLC0415
+        from shell_context import (  # noqa: PLC0415
+            mask_quoted_redirects, split_segments, strip_comments,
+            strip_heredocs,
+        )
 
-        text = strip_comments(strip_heredocs(command))
+        segments = split_segments(
+            mask_quoted_redirects(strip_comments(strip_heredocs(command))))
     except Exception:  # noqa: BLE001 - a target list is never worth a failed hook
-        text = command
+        segments = [command]
 
     found: list[str] = []
-    for pattern in (_REDIRECT_TARGET, _OUTPUT_FLAG):
-        for match in pattern.finditer(text):
-            candidate = match.group(1).strip("'\"")
-            if not candidate or candidate.startswith("&"):
-                continue
-            if candidate.startswith("/dev/"):
-                continue
-            resolved = _canonical(candidate, cwd)
-            if resolved and resolved not in found:
-                found.append(resolved)
+    for segment in segments:
+        patterns = [_REDIRECT_TARGET]
+        if _DOWNLOADER.search(segment):
+            patterns.append(_OUTPUT_FLAG)
+        for pattern in patterns:
+            for match in pattern.finditer(segment):
+                candidate = match.group(1).strip("'\"")
+                if not candidate or candidate.startswith("&"):
+                    continue
+                if candidate.startswith("/dev/"):
+                    continue
+                resolved = _canonical(candidate, cwd)
+                if resolved and resolved not in found:
+                    found.append(resolved)
     return found[:MAX_ENTRIES]
 
 

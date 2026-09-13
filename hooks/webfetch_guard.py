@@ -23,7 +23,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).parent))
-from patterns import MAX_STDIN_BYTES, looks_encoded  # noqa: E402
+from patterns import (  # noqa: E402
+    MAX_STDIN_BYTES, longest_unspaced_run, looks_encoded,
+)
 from hook_event import (  # noqa: E402
     context_from_event, parse_event, read_stdin_text,
 )
@@ -226,6 +228,65 @@ def _encoded_blob_in_path(url: str) -> str | None:
     return None
 
 
+# Both floors are the ones written into the patterns above, re-applied to the
+# longest run of the value that carries no encoded space.
+_ENCODED_FLOOR = 40
+_LONG_VALUE_FLOOR = 80
+
+
+def _confirm_encoded_data(matched: str) -> bool:
+    """A base64-alphabet run that is really ``+``-separated words is a phrase.
+
+    ``+`` is a space in a query string, and a literature search is written
+    entirely in the base64 alphabet:
+    ``?query=Parasuraman+Davies+taxonomic+analysis+of+vigilance+performance``
+    asked, and over three days of shipped log 41 of this guard's asks were that
+    one shape — academic search URLs, every one of them.
+
+    A hex digest has no ``+`` in it to decode, so the hex branch of the pattern
+    passes this unchanged rather than needing an exception written for it.
+    """
+    _, _, value = matched.partition("=")
+    return len(longest_unspaced_run(value)) >= _ENCODED_FLOOR
+
+
+def _confirm_long_query_value(matched: str) -> bool:
+    """80 characters of prose is a sentence; 80 unbroken characters is a value.
+
+    ``?q=intitle:%22Introduction+to+Statistical+Communication+Theory%22`` is a
+    book title, and it is long the way titles are long — in words. What this
+    detector is for is a value with nothing in it to read, so the length is
+    measured against the longest stretch carrying no encoded space.
+    """
+    _, _, value = matched.partition("=")
+    return len(longest_unspaced_run(value)) >= _LONG_VALUE_FLOOR
+
+
+_CONFIRMERS = {
+    "encoded_data_in_url": _confirm_encoded_data,
+    "long_query_value": _confirm_long_query_value,
+}
+
+
+def _first_confirmed(name: str, url: str) -> tuple[str, str] | None:
+    """The first match of ``name`` in ``url`` that survives its confirmer.
+
+    Every match is offered rather than only the first: one URL can carry a
+    search phrase in one parameter and a payload in the next, and clearing the
+    phrase must not clear what follows it.
+    """
+    confirmer = _CONFIRMERS.get(name)
+    for match in URL_PATTERNS[name].finditer(url):
+        if confirmer is None:
+            return (name, match.group(0))
+        try:
+            if confirmer(match.group(0)):
+                return (name, match.group(0))
+        except Exception:  # noqa: BLE001 - a broken confirmer must not hide a match
+            return (name, match.group(0))
+    return None
+
+
 def check_url(url: str) -> tuple[str, str] | None:
     """Return (pattern_name, matched_text) for a suspicious URL, else None.
 
@@ -254,9 +315,9 @@ def check_url(url: str) -> tuple[str, str] | None:
         "sensitive_param",
         "long_query_value",
     ):
-        match = URL_PATTERNS[name].search(url)
-        if match:
-            return (name, match.group(0))
+        found = _first_confirmed(name, url)
+        if found:
+            return found
 
     blob = _encoded_blob_in_path(url)
     if blob:

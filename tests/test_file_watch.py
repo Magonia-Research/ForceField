@@ -391,6 +391,29 @@ if True:
     check(relative == [os.path.realpath("/tmp/payload.sh")],
           "an output flag is resolved against the event cwd, not the process cwd")
 
+    # A `>` inside quotes is a character, not a redirect. Both sides of a
+    # correlation run this extractor, so junk is not inert: two commands
+    # carrying the same ordinary regex produced the same junk path and
+    # correlated with each other, 20 times in three days of shipped log.
+    check(write_ledger.extract_targets(
+        """python3 -c "t=re.sub(r'<[^>]+>','',t)" """, cwd="/tmp") == [],
+        "a quoted regex bracket is not a redirect target")
+    check(write_ledger.extract_targets(
+        "grep -o 'Record/[0-9]*' page.html", cwd="/tmp") == [],
+        "grep's -o prints matches, it does not name an output file")
+    check(write_ledger.extract_targets(
+        "container run --rm -v /o:/out curlimages/curl:latest "
+        "-sS -o /out/f.json https://x/y", cwd="/tmp")
+        == [os.path.realpath("/out/f.json")],
+        "a fetcher that is not the leading word still yields its -o target")
+    # ...and the seam: a real redirect beside a quoted one still lands, and a
+    # quoted TARGET is still read, since only the operator was in question.
+    mixed = write_ledger.extract_targets(
+        """python3 -c "re.sub(r'<[^>]+>','',t)" > "/tmp/ff-probe/real.txt" """,
+        cwd="/tmp")
+    check(mixed == [os.path.realpath("/tmp/ff-probe/real.txt")],
+          "the unquoted redirect is kept and the quoted one dropped")
+
     blocked = os.path.realpath("/tmp/ff-probe/out.py")
     write_ledger.record_block(SESSION, "exfil_guard", "pipe_to_shell", "deny",
                               [blocked])

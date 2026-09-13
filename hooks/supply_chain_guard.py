@@ -263,23 +263,51 @@ DANGEROUS_INSTALL = {
         r"[^\n]{0,256}?\$\{?\1\b"
     ),
     "fetch_then_exec": re.compile(
-        # download to a file, then run that file — two shapes, both ask (the file
+        # download to a file, then run THAT file — two shapes, both ask (the file
         # is on disk and can be inspected first):
-        #   (1) same line, any sequencer after an ``-o``/``-O`` write:
-        #       ``curl -o f URL; sh f`` / ``… && …`` / ``… || …`` (keeps the
-        #       original -O remote-name coverage).
+        #   (1) ``curl -O`` and nothing else. curl's -O derives the name from the
+        #       URL, so there is no filename token to correlate on and an
+        #       uncorrelated match is the only one available. wget's -O is the
+        #       opposite flag — it NAMES the output file — so wget is correlatable
+        #       and belongs to shape (2), which is why this branch is curl-only.
         #   (2) the SAME downloaded file executed later — across a newline or any
         #       separator, and including a ``>``/``>>`` redirect target.
-        #       Correlating on the filename keeps the newline-crossing form from
-        #       over-asking on an unrelated later interpreter or a fetched *data*
-        #       file consumed as an argument.
+        #
+        # Correlation is the whole discriminator, and shape (1) used to skip it:
+        # any ``-o``/``-O`` download followed by any interpreter matched, so
+        # fetch-then-PARSE read as fetch-then-execute. Measured twice on
+        # 2026-08-12 — ``curl -o npr.html URL && python3 -c '<inline parser>'``
+        # asked, though the program is right there on the command line and the
+        # downloaded bytes are only ever opened as data. That is the same
+        # over-asking shape (2)'s filename correlation was written to prevent;
+        # this applies it wherever a filename exists to correlate on.
+        #
+        # The inline-program forms stay caught because the correlated branch
+        # allows the quote, the ``./`` and the exec verb that an interpreter's
+        # ``-c`` argument puts in front of the filename: ``sh -c './s.sh'`` and
+        # ``bash -c 'source payload.sh'`` both still name the file they run.
+        #
+        # ``f`` has to be a WHOLE filename token, and the two assertions around
+        # it are what make the correlation mean anything. Without them the
+        # engine backtracks to whatever short prefix lets the back-reference
+        # succeed, and with ``"`` still inside the class the shortest workable
+        # ``f`` was one double quote: ``curl … -o "/out/$1" …`` correlated
+        # against the opening quote of a later ``python3 -c "``, so a download
+        # and an unrelated inline parser "matched filenames". Measured on three
+        # separate archive fetches in the shipped log. Excluding the quote from
+        # the class and requiring the token to end at a shell boundary fixes
+        # both halves; the optional opening quote keeps ``-o "/out/f.json"``
+        # readable. The 3-character floor is the last piece of the same
+        # argument — a one-character correlation is not a correlation.
         r"(?:"
-        + _FETCHER + r"\b[^\n]{0,512}\s-[oO]\b[^\n]{0,512}?(?:&&|\|\||;)[^\n]{0,512}?"
+        r"curl\b[^\n]{0,512}\s-O\b[^\n]{0,512}?(?:&&|\|\||;)[^\n]{0,512}?"
         r"(?<!\w)(?:" + _INTERP + r"|source)\b"
         r"|"
-        + _FETCHER + r"\b[^\n]{0,512}?(?:\s-[oO]\s+|>>?\s*)(?P<f>[^\s;&|<>()'`]{1,256})"
+        + _FETCHER + r"\b[^\n]{0,512}?(?:\s-[oO]\s+|>>?\s*)['\"]?"
+        r"(?P<f>[^\s;&|<>()'\"`]{3,256})(?=[\s;&|<>()'\"`]|$)"
         r"[\s\S]{0,2048}?(?<!\w)(?:" + _INTERP + r"|source|\.)\s+(?:-\S+\s+)*"
-        r"(?P=f)(?!\w)"
+        r"['\"]?(?:(?:source|exec|eval|bash|sh|zsh|python[23]?|node|ruby|perl)\s+)?"
+        r"(?:\./)?(?P=f)(?!\w)"
         r")"
     ),
     "pip_url_install": re.compile(
@@ -499,6 +527,27 @@ def executable_text(command: str) -> str:
         return command
 
 
+def _scan_groups(command: str):
+    """Yield ``(structural, variants)`` for every text worth matching against.
+
+    ``structural`` is the quote-intact command line the variants came from, and
+    the pairing is the point: normalizing dissolves quotes, so a confirmer
+    asking where something SITS in the shell must be handed the original. The
+    pair has to travel together because the group can be an interpreter body --
+    the quote-intact form of ``bash -c "curl … | sh"``'s match is that body, not
+    the command wrapped around it.
+    """
+    base = executable_text(command)
+    yield base, _detection_variants(base)
+    try:
+        from shell_context import interpreter_bodies
+
+        for body in interpreter_bodies(base):
+            yield body, _detection_variants(body)
+    except Exception:  # noqa: BLE001 - an extra scan target, never a gate
+        pass
+
+
 def _scan_texts(command: str) -> tuple[str, ...]:
     """Every text a detection pattern should be matched against.
 
@@ -508,15 +557,9 @@ def _scan_texts(command: str) -> tuple[str, ...]:
     Bodies are bounded, so this cannot multiply the work without limit and blow
     the 5s hook budget, which is itself a security boundary.
     """
-    base = executable_text(command)
-    texts = list(_detection_variants(base))
-    try:
-        from shell_context import interpreter_bodies
-
-        for body in interpreter_bodies(base):
-            texts.extend(_detection_variants(body))
-    except Exception:  # noqa: BLE001 - an extra scan target, never a gate
-        pass
+    texts = []
+    for _, variants in _scan_groups(command):
+        texts.extend(variants)
     return tuple(texts)
 
 
@@ -573,7 +616,78 @@ _SCRIPT_SUFFIXES = (
 )
 
 
-def _executes_stdin(text: str, _matched: str) -> bool:
+def _piped_interpreter_tokens(text: str, matched: str):
+    """Tokens of the segment holding the interpreter this match piped into.
+
+    The segment has to be found from the MATCH, not from the command. This read
+    ``split_segments(text)[-1]`` -- the last segment of the whole command -- and
+    a pipeline is almost never the last thing on a line, so the confirmer kept
+    landing on text with no interpreter in it at all and confirming by default.
+    Every one of the three hard denies measured in three days of shipped log was
+    that: ``curl … | python3 -c "<parser>"`` followed by ``| head -40``, or by
+    the ``echo; done`` of the loop around it. The interpreter had a program of
+    its own in each case, which is precisely what this function exists to see.
+
+    The match ends AT the interpreter name, so the flags that decide the
+    question sit past it. The WHOLE command is split and the segment holding
+    that offset is selected — never a slice of it. Slicing from the match was
+    the first attempt and it fails on the shape that provoked this: the match
+    begins inside a ``sh -c '…'`` body, so the slice opens mid-quote, the
+    apostrophe that CLOSED that body reads as one that opens a new one, and
+    every quote state after it is inverted.
+    """
+    from shell_context import split_segments, tokenize  # noqa: PLC0415
+
+    position = text.find(matched)
+    if position < 0:
+        return [], None
+    offset = position + len(matched) - 1
+    cursor = 0
+    for segment in split_segments(text):
+        start = text.find(segment, cursor)
+        if start < 0:
+            continue
+        cursor = start + len(segment)
+        if not start <= offset < cursor:
+            continue
+        tokens = tokenize(segment)
+        for index, token in enumerate(tokens):
+            if _INTERP_NAME_RE.match(token.rsplit("/", 1)[-1]):
+                return tokens, index
+        return tokens, None
+    return [], None
+
+
+# Basenames of everything ``_FETCHER`` and ``_HTTPIE`` can name.
+_FETCHER_NAMES = frozenset(
+    ["curl", "wget", "wget2", "fetch", "aria2c", "http", "https"])
+
+
+def _fetcher_is_invoked(structural: str) -> bool:
+    """True when some segment of the quote-intact text actually runs a fetcher.
+
+    ``_FETCHER_AT_CMD`` counts ``(`` as a command position, which it has to --
+    ``(curl … | sh)`` is a subshell. But it reads raw text, so a ``(`` inside a
+    quoted argument counts too, and every one of these names is also an ordinary
+    word. Measured here, on a command run while fixing this very file:
+
+        python3 tests/test_plugin.py 2>&1 | grep -E "PASS: (fet''ch|pipe)|FAIL" | head
+
+    ``(fet``+``ch`` is a grep alternation branch and the ``|`` after it belongs
+    to the same quoted pattern -- and that was a hard DENY. Splitting the way
+    the shell does settles it: the quotes hold, so nothing in there is a command
+    word. Obfuscation survives, because the split tokenizes with ``shlex`` and
+    ``\\curl`` comes back as ``curl``.
+    """
+    try:
+        from shell_context import leading_command, split_segments  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - anchoring is an FP fix, never a gate
+        return True
+    return any(leading_command(segment) in _FETCHER_NAMES
+               for segment in split_segments(structural))
+
+
+def _executes_stdin(text: str, matched: str, structural: str = "") -> bool:
     """True when the piped-to interpreter runs what arrives on stdin.
 
     ``cat fetch.log | python3 parse.py`` pipes a local file into an interpreter
@@ -584,17 +698,15 @@ def _executes_stdin(text: str, _matched: str) -> bool:
     An interpreter executes stdin only when it is handed no program of its own.
     A script-file argument, ``-c CODE`` and ``-m MODULE`` are all programs;
     ``-s`` explicitly means "read the program from stdin" and settles it.
+
+    Both halves of the pattern are confirmed: that a fetcher is really invoked,
+    and that the interpreter really executes stdin. They fail in different ways
+    and either one alone leaves a hard deny firing on quoted text.
     """
+    if structural and not _fetcher_is_invoked(structural):
+        return False
     try:
-        from shell_context import split_segments, tokenize
-    except Exception:  # noqa: BLE001 - anchoring is an FP fix, never a gate
-        return True
-    try:
-        tokens = tokenize(split_segments(text)[-1])
-        index = None
-        for position, token in enumerate(tokens):
-            if _INTERP_NAME_RE.match(token.rsplit("/", 1)[-1]):
-                index = position
+        tokens, index = _piped_interpreter_tokens(text, matched)
         if index is None:
             return True
         # xargs and parallel exist to turn stdin into the next command's
@@ -664,20 +776,21 @@ def check_dangerous(command: str) -> tuple[str, str] | None:
     command that already was. The patterns that needed the test are gone, so the
     test is too.
     """
-    variants = _scan_texts(command)
+    groups = tuple(_scan_groups(command))
     for name, pattern in DANGEROUS_INSTALL.items():
         confirmer = _POSITIONAL_CONFIRMERS.get(name)
-        for text in variants:
-            match = pattern.search(text)
-            if not match:
-                continue
-            if confirmer is not None:
-                try:
-                    if not confirmer(text, match.group(0)):
-                        continue
-                except Exception:  # noqa: BLE001
-                    pass
-            return (name, match.group(0))
+        for structural, variants in groups:
+            for text in variants:
+                match = pattern.search(text)
+                if not match:
+                    continue
+                if confirmer is not None:
+                    try:
+                        if not confirmer(text, match.group(0), structural):
+                            continue
+                    except Exception:  # noqa: BLE001
+                        pass
+                return (name, match.group(0))
     return None
 
 

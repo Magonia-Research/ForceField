@@ -348,6 +348,42 @@ check_all("deny", (
     "eval $'\\x27\\x72\\x6d\\x27'",
 ))
 
+# The same argument one step further: a C0 control is unprintable, so no command
+# name, path or flag can contain one. These kept denying after the quote fix
+# shipped -- `sed 's/\x1b\[...//g'` (strip ANSI colour from captured output) was
+# hard-denied in the log on 2026-08-11, and the class extends to `tr -d '\015'`
+# and `awk -F'\x09'` in all four escape spellings.
+check_all("allow", (
+    "sed -e 's/\\x1b\\[[0-9;]*m//g' out.txt",
+    "sed -e 's/\\033\\[[0-9;]*m//g' out.txt",
+    "tr -d '\\015' < in.txt > out.txt",
+    "awk -F'\\x09' '{print $2}' data.tsv",
+    "printf 'a\\x0ab'",
+    "echo $'\\u001b'",
+    "echo $'\\U0000007f'",
+))
+# High bytes are the same argument again: 0x80-0xff cannot appear in ASCII, so
+# they are UTF-8 continuation bytes and binary signatures, never a command word.
+# These denied ten times in three days of shipped log -- a NUL normaliser on a
+# PDF extraction, a JPEG marker walk, a census counting a middle dot.
+check_all("allow+ctx", (
+    "python3 -c \"t = open('x.txt').read().replace('\\x00', ' ')\"",
+    "python3 -c \"m in (b'\\xc0', b'\\xc1', b'\\xc2', b'\\xcf')\"",
+    "python3 extract.py paper.pdf \"2 \\xc2\\xb7 10\" \"50 000\"",
+))
+check_all("allow", (
+    "printf '\\303\\251'",
+    "tr -d '\\377' < in.bin > out.bin",
+))
+# ...and the boundary that keeps the rung honest: \x24\x28 spells `$(`, which is
+# printable, so it is exactly the kind of encoding worth reading and still dies.
+check_all("deny", (
+    "eval $'\\x24\\x28id\\x29'",
+    "eval $'\\x1b\\x72\\x6d'",
+    "printf '\\015\\162\\155'",
+    "eval $'\\xff\\x72\\x6d -rf /'",
+))
+
 check_all("deny", (
     "nsenter -t 1 -m -u -i -n sh",
     "unshare -m /bin/sh",
@@ -1111,6 +1147,34 @@ _RM_CASES = (
      "podman run --rm -it img make -r -f Makefile", "allow"),
     ("bare word argument is not covered, and must not be",
      "sudo -u root %s /var/tmp/y" % _RMRF, "allow"),
+    # A single-quoted body being FILED to disk is data, not command text -- the
+    # same rule strip_heredocs applies to `cat > f <<'EOF'`, reached through
+    # `printf '...' > f`. The shipped log denied a containerized image build
+    # because the Dockerfile it was writing carried the apt-lists cleanup line.
+    ("dockerfile body written by printf",
+     "mkdir -p _t && printf 'FROM debian:13\\nRUN apt-get update -qq && "
+     "apt-get install -y -qq poppler-utils && %s /var/lib/apt/lists/*\\n' "
+     "> _t/Dockerfile && container build -t p:latest _t" % _RMRF, "allow"),
+    ("appended body",
+     "printf 'set -e && %s /tmp/x\\n' >> deploy.sh" % _RMRF, "allow"),
+    # ...but the body is only inert because the shell is FILING it. Each of these
+    # keeps every byte, so the fix is a seam rather than a mute button. Every
+    # payload here carries an operator before the rm, because that is what makes
+    # it a command position at all -- `printf 'rm -rf x'` has always been allowed
+    # (rm after a plain space is what keeps `git rm` allowed), so asserting on it
+    # would prove nothing about the stripping either way.
+    ("piped to a shell is command text, not data",
+     "printf 'set -e && %s /tmp/build' | sh" % _RMRF, "deny"),
+    ("no redirect, no stripping",
+     "printf 'set -e && %s /tmp/build'" % _RMRF, "deny"),
+    ("double quotes still expand, so they are not dropped",
+     "printf \"set -e && %s /tmp/build\" > f.sh" % _RMRF, "deny"),
+    ("unquoted body is not dropped",
+     "echo set -e && %s /tmp/build > f.sh" % _RMRF, "deny"),
+    ("a real rm in the same command as a filed body still denies",
+     "printf 'note' > f.txt && %s /tmp/build" % _RMRF, "deny"),
+    ("the rm after a filed body's redirect target still denies",
+     "printf 'a && b\\n' > f.sh; %s /tmp/build" % _RMRF, "deny"),
 )
 for _label, _cmd, _want in _RM_CASES:
     _proc = _run(json.dumps({"tool_input": {"command": _cmd}}))

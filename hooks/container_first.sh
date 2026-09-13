@@ -135,7 +135,63 @@ strip_heredocs() {
     }'
 }
 
-SCAN=$(printf '%s' "$CMD" | strip_heredocs)
+# -----------------------------------------------------------
+# Drop the SINGLE-QUOTED body of a `printf`/`echo` that is being filed to disk.
+#
+# The same rule as strip_heredocs, reached through a different spelling. A
+# heredoc filed by `cat > f <<'EOF'` already has its body dropped; the identical
+# text written by `printf '...' > f` did not, and the shipped log caught the
+# consequence on the DENY rung, which is contractually zero-false-positive:
+#
+#   printf 'FROM debian:13\nRUN apt-get ... && rm -rf /var/lib/apt/lists/*\n' \
+#     > _tools/pdfimg/Dockerfile && container build -t pdftools:latest ...
+#
+# That `rm` is a line of a Dockerfile. The shell files it as bytes and never
+# executes it, but this guard scans raw text with no quote awareness, so `&& rm`
+# read as a command position and the containerized build was blocked.
+#
+# Three things keep this from becoming a mute button. SINGLE quotes only, for
+# the reason `<<'EOF'` is treated differently from `<<EOF`: single quotes are
+# the shell promising it will not expand the body, while a double-quoted body
+# still gets $(...) run on it before the redirect. A REDIRECT is required, so
+# `printf 'rm -rf /' | sh` -- where the body IS command text -- keeps every
+# byte, as does an unquoted or unterminated body. And only the quoted span is
+# ever blanked: the command, its flags and the redirect TARGET all survive, so
+# `echo '1' > /proc/sys/kernel/x` is still the kernel write it was.
+# Everything here is regex work, deliberately: the first cut walked the line a
+# character at a time to track quote state, and awk string concatenation made
+# that quadratic -- 0.44s at 64 KB, 3.7s at 200 KB, and the 1 MB command in
+# tests/test_container_first.py ran past its timeout into a hook that delivered
+# nothing. The token alternation below is what a char walk was there for: a
+# single-quoted run may hold the operators (`&&` in a Dockerfile RUN line) that
+# would otherwise end the command, and it is matched as one token instead.
+strip_filed_text() {
+  awk -v SQ="'" -v DQ='"' '
+    BEGIN {
+      # printf/echo at a command position, its arguments (a quoted span is ONE
+      # token, so operators inside it do not end the command), then the redirect
+      # and its target. No `>` before the next operator means no match, which is
+      # what leaves `printf ... | sh` whole.
+      TOKEN = "([ \t]*(" SQ "[^" SQ "]*" SQ "|" DQ "[^" DQ "]*" DQ "|[^;&|" SQ DQ "><]+))*"
+      FILED = "(^|[;&|])[ \t]*(printf|echo)" TOKEN "[ \t]*>>?[ \t]*[^;&|<>]+"
+      BLANK = SQ "[^" SQ "]*" SQ
+    }
+    {
+      line = $0
+      # Cheap gate: both a quote to blank and a redirect to justify it.
+      if (index(line, SQ) == 0 || index(line, ">") == 0) { print line; next }
+      out = ""
+      while (match(line, FILED)) {
+        seg = substr(line, RSTART, RLENGTH)
+        gsub(BLANK, SQ SQ, seg)
+        out = out substr(line, 1, RSTART - 1) seg
+        line = substr(line, RSTART + RLENGTH)
+      }
+      print out line
+    }'
+}
+
+SCAN=$(printf '%s' "$CMD" | strip_heredocs | strip_filed_text)
 
 # -----------------------------------------------------------
 # Logging helper (fire-and-forget)
@@ -404,14 +460,32 @@ fi
 # are common, legitimate shell, and hard-denying them (a deny,
 # not an ask) violated the zero-false-positive rule.
 #
-# An encoded QUOTE is dropped before the scan, and that is what keeps this
-# rung's zero-false-positive contract. \x27 and \x22 are how anyone writes a
-# quote they cannot type -- a one-liner nested inside $( ) inside a double
-# quoted string has no spelling left for a literal ' -- and the shipped log
-# caught exactly that: a `python3 -c` regex containing (?:\"|\x27) was DENIED
-# as an obfuscated command. It hid nothing. A command name is letters, so an
-# obfuscated `rm` must encode letters (\x72\x6d) and still matches here; a
-# payload that encodes only its quotes has encoded nothing worth reading.
+# One rule decides what is dropped before the scan, and it is what keeps this
+# rung's zero-false-positive contract: AN ESCAPE THAT CANNOT SPELL A CHARACTER A
+# COMMAND WORD CONTAINS HAS ENCODED NOTHING WORTH READING. A command name, a
+# path and a flag are printable ASCII, so an obfuscated `rm` must encode letters
+# (\x72\x6d) and still dies here. What that leaves out is dropped:
+#
+#   QUOTES (\x27, \x22) are how anyone writes a quote they cannot type -- a
+#   one-liner nested inside $( ) inside a double-quoted string has no spelling
+#   left for a literal ' -- and the shipped log caught exactly that: a
+#   `python3 -c` regex containing (?:\"|\x27) was DENIED as obfuscation.
+#
+#   C0 CONTROLS (\x00-\x1f) and DEL are unprintable, so every ordinary use is a
+#   text-processing literal: `sed -e 's/\x1b\[[0-9;]*m//g'` strips ANSI colour
+#   from captured output, and the class runs through `tr -d '\015'` and
+#   `awk -F'\x09'`.
+#
+#   HIGH BYTES (\x80-\xff, octal 200-377) cannot appear in ASCII at all. These
+#   are UTF-8 continuation bytes and binary file signatures, and they denied ten
+#   times in three days of shipped log -- `.replace('\x00',' ')` normalising a
+#   PDF extraction, a JPEG marker walk testing b'\xc0'..b'\xcf', a census
+#   counting "2 \xc2\xb7 10". The \u and \U forms need no equivalent line
+#   because the pattern below already stops at 007F for those.
+#
+# Note what stays denied by construction: \x24\x28 spells `$(`, which is
+# printable and is exactly the kind of encoding worth reading.
+#
 # Dropped textually rather than excluded in the pattern because the pattern is
 # an alternation of four escape syntaxes and each would need its own carve-out.
 # -----------------------------------------------------------
@@ -419,7 +493,12 @@ fi
 ESCAPE_SCAN=$(printf '%s' "$SCAN" |
   sed -e 's/\\x22//g' -e 's/\\x27//g' -e 's/\\042//g' -e 's/\\047//g' \
     -e 's/\\u0022//g' -e 's/\\u0027//g' \
-    -e 's/\\U00000022//g' -e 's/\\U00000027//g')
+    -e 's/\\U00000022//g' -e 's/\\U00000027//g' \
+    -e 's/\\x[01][0-9a-fA-F]//g' -e 's/\\x7[fF]//g' \
+    -e 's/\\0[0-3][0-7]//g' -e 's/\\177//g' \
+    -e 's/\\u00[01][0-9a-fA-F]//g' -e 's/\\u007[fF]//g' \
+    -e 's/\\U000000[01][0-9a-fA-F]//g' -e 's/\\U0000007[fF]//g' \
+    -e 's/\\x[89a-fA-F][0-9a-fA-F]//g' -e 's/\\[23][0-7][0-7]//g')
 
 if grep -qE '(\\x[0-9a-fA-F]{2}|\\[0-7]{3}|\\u00[0-7][0-9a-fA-F]|\\U000000[0-7][0-9a-fA-F])' <<<"$ESCAPE_SCAN"; then
   emit_deny "obfuscation" $'BLOCKED: Obfuscated command detected (hex/octal escape sequences).\nIf this is legitimate, write it in plain text.'
