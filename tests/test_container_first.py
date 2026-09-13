@@ -375,13 +375,35 @@ check_all("allow", (
     "printf '\\303\\251'",
     "tr -d '\\377' < in.bin > out.bin",
 ))
+# A RANGE ENDPOINT spells a set, not a character, and a set is not a command
+# name. The per-escape rule above asks whether one escape could spell a
+# character a command word contains; \x20 (space) and \x7e (~) both can, so
+# `[\x20-\x7e]` -- the printable-ASCII class, which is how anyone pulls readable
+# strings out of a binary -- survived every drop above and hard-denied in the
+# shipped log on 2026-09-13, on a .doc string extraction. Bash has no ranges in
+# $'...': `$'[\x72-\x72]'` is the literal text `[r-r]`, not `r`. An escape on
+# each side of a `-` is therefore a regex or glob bracket expression, where the
+# endpoints name a span rather than concatenating into a word.
+check_all("allow+ctx", (
+    "python3 -c \"import re; print(re.findall(rb'[\\x20-\\x7e]{25,}', d))\"",
+    "python3 -c \"print(re.sub(rb'[^\\x09-\\x7e]+', b' ', raw))\"",
+    "perl -ne 'print if /[\\x21-\\x7e]/' f",
+))
+check_all("allow", (
+    "grep -aoE '[\\x20-\\x7E]{6,}' dump.bin",
+    "tr -dc '\\040-\\176' < in.bin",
+))
 # ...and the boundary that keeps the rung honest: \x24\x28 spells `$(`, which is
 # printable, so it is exactly the kind of encoding worth reading and still dies.
+# The last two are the range fix's own seam: dropping a span must not launder the
+# concatenated letters beside it, in either order.
 check_all("deny", (
     "eval $'\\x24\\x28id\\x29'",
     "eval $'\\x1b\\x72\\x6d'",
     "printf '\\015\\162\\155'",
     "eval $'\\xff\\x72\\x6d -rf /'",
+    "grep -o '[\\x20-\\x7e]' f; eval $'\\x72\\x6d -rf /'",
+    "eval $'\\x72\\x6d' && grep -o '[\\x20-\\x7e]' f",
 ))
 
 check_all("deny", (

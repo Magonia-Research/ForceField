@@ -483,15 +483,36 @@ fi
 #   counting "2 \xc2\xb7 10". The \u and \U forms need no equivalent line
 #   because the pattern below already stops at 007F for those.
 #
+# That rule is about ONE escape, and a second rule is about a PAIR: AN ESCAPE ON
+# EACH SIDE OF A `-` NAMES A SPAN, AND A SPAN IS NOT A COMMAND NAME. The
+# per-escape rule clears the endpoints of `[\x20-\x7e]` on their own merits --
+# space and `~` are both printable, both spellable in a command word -- so the
+# printable-ASCII class survived every drop above and hard-denied on 2026-09-13,
+# on a .doc string extraction that is the ordinary way to pull readable runs out
+# of a binary. Bash has no ranges in ANSI-C quoting: `$'[\x72-\x72]'` is the
+# literal text `[r-r]`, not `r`. An escape-dash-escape is therefore a regex or
+# glob bracket expression, where the endpoints bound a set instead of
+# concatenating into a word, and an obfuscated `rm` cannot be written as one.
+# Both endpoints must be escapes: dropping a half-open `[a-\x7e]` would start
+# consuming escapes that do sit next to ordinary text.
+#
 # Note what stays denied by construction: \x24\x28 spells `$(`, which is
-# printable and is exactly the kind of encoding worth reading.
+# printable and is exactly the kind of encoding worth reading. A span dropped
+# here takes only its own two endpoints with it, so concatenated letters
+# anywhere else on the line still carry their own verdict.
 #
 # Dropped textually rather than excluded in the pattern because the pattern is
 # an alternation of four escape syntaxes and each would need its own carve-out.
+# The range forms come first so a pair is consumed whole, before either endpoint
+# can be judged on its own.
 # -----------------------------------------------------------
 
 ESCAPE_SCAN=$(printf '%s' "$SCAN" |
-  sed -e 's/\\x22//g' -e 's/\\x27//g' -e 's/\\042//g' -e 's/\\047//g' \
+  sed -e 's/\\x[0-9a-fA-F][0-9a-fA-F]-\\x[0-9a-fA-F][0-9a-fA-F]//g' \
+    -e 's/\\[0-7][0-7][0-7]-\\[0-7][0-7][0-7]//g' \
+    -e 's/\\u00[0-9a-fA-F][0-9a-fA-F]-\\u00[0-9a-fA-F][0-9a-fA-F]//g' \
+    -e 's/\\U000000[0-9a-fA-F][0-9a-fA-F]-\\U000000[0-9a-fA-F][0-9a-fA-F]//g' \
+    -e 's/\\x22//g' -e 's/\\x27//g' -e 's/\\042//g' -e 's/\\047//g' \
     -e 's/\\u0022//g' -e 's/\\u0027//g' \
     -e 's/\\U00000022//g' -e 's/\\U00000027//g' \
     -e 's/\\x[01][0-9a-fA-F]//g' -e 's/\\x7[fF]//g' \

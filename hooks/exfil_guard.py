@@ -516,7 +516,92 @@ def _substitution_bodies(text: str):
         index = cursor
 
 
-def _substitution_is_literal(body: str) -> bool:
+# An expansion and the name it expands: ``$T``, ``${T}``, ``$2``. The optional
+# brace also covers the trimming forms (``${T##*/}``), whose value is still
+# bounded by T's, so reading them as T is sound.
+_EXPANSION = re.compile(r"\$\{?(\w+)\}?")
+
+# A value with nothing left to expand: single-quoted (inert), double-quoted with
+# no expansion inside, or a bare word carrying neither an expansion nor an
+# operator. Empty is literal — ``T=`` binds nothing.
+_LITERAL_VALUE = re.compile(r"'[^']*'|\"[^\"$`]*\"|[^\s'\"$`;&|<>()]*")
+
+# An assignment at a command position, and the value it binds.
+_ASSIGNMENT = re.compile(
+    r"(?:\A|[\n;&|])\s*(\w+)=('[^']*'|\"[^\"]*\"|[^\s;&|<>()]*)")
+
+# A function definition, which is what binds a positional parameter.
+_FUNCTION_DEF = re.compile(
+    r"(?:\A|[\n;&|])\s*(?:function\s+)?([A-Za-z_][\w-]*)\s*\(\)\s*\{")
+
+
+def _binds_only_literals(name: str, text: str) -> bool:
+    """True when every assignment to ``name`` in ``text`` binds a literal.
+
+    EVERY, not any: one literal assignment says nothing while another
+    assignment can still reach host state, and quantifying it this way is also
+    what makes a spurious match safe — an ``x=1`` picked up from inside a
+    quoted program can only add a literal to the list, never remove a real one.
+
+    At least one assignment is required. A variable this text never assigns
+    comes from the environment, which is precisely what the command line does
+    not show.
+    """
+    values = [match.group(2) for match in _ASSIGNMENT.finditer(text)
+              if match.group(1) == name]
+    return bool(values) and all(_LITERAL_VALUE.fullmatch(v) for v in values)
+
+
+def _enclosing_function(text: str, offset: int) -> str | None:
+    """Name of the function whose body contains ``offset``, or None.
+
+    The nearest preceding definition, rejected if the body has already closed
+    before ``offset``. Brace counting here is not quote-aware, so an unbalanced
+    brace inside a quoted program can misattribute the offset — in the wrong
+    direction only: a misattributed name has no literal call sites and the
+    finding stands, and a substitution wrongly read as being outside a function
+    also stands.
+    """
+    candidate = None
+    for match in _FUNCTION_DEF.finditer(text):
+        if match.end() > offset:
+            break
+        candidate = match
+    if candidate is None:
+        return None
+    span = text[candidate.end():offset]
+    if span.count("}") > span.count("{"):
+        return None
+    return candidate.group(1)
+
+
+def _call_sites_pass_literals(name: str, text: str) -> bool:
+    """True when every call to ``name`` in ``text`` passes only literal words.
+
+    A function never called in this text fails: its parameters are then bound
+    by nothing visible here. The lookahead for whitespace is what keeps the
+    definition itself (``n(){``) from reading as a call.
+    """
+    calls = re.compile(r"(?:\A|[\n;&|])\s*" + re.escape(name) + r"(?=\s)([^\n;&|]*)")
+    arguments = [match.group(1) for match in calls.finditer(text)]
+    return bool(arguments) and not any(
+        "$" in argument or "`" in argument for argument in arguments)
+
+
+def _expansion_is_literal(name: str, text: str, offset: int) -> bool:
+    """True when ``$name`` can only expand to what ``text`` already shows.
+
+    A positional parameter is bound by the CALL SITE, and when the callee is
+    defined in the same command every call site is visible; a named variable is
+    bound by its ASSIGNMENTS, and those are visible too.
+    """
+    if name.isdigit():
+        function = _enclosing_function(text, offset)
+        return function is not None and _call_sites_pass_literals(function, text)
+    return _binds_only_literals(name, text)
+
+
+def _substitution_is_literal(body: str, text: str, offset: int) -> bool:
     """True when a substitution body can only emit what it already shows.
 
     ``$(enc 'File:KSC-03PD-3300.jpg')`` hands a helper a string that is already
@@ -525,38 +610,60 @@ def _substitution_is_literal(body: str) -> bool:
     ``$(printf '%s' "$TOKEN")`` are the finding this pattern is named for.
 
     Three conditions, each about what the body can REACH rather than what it is
-    called: the shape above (a verb and quoted arguments only), no expansion
-    left inside those quotes — single quotes are inert, double quotes are not —
-    and a verb that does not read host state. A verb with no arguments at all
-    fails the shape, which is deliberate: ``id`` and ``whoami`` are exactly
-    that.
+    called: the shape above (a verb and quoted arguments only), a verb that does
+    not read host state, and every expansion left inside those quotes bound to
+    something this same text writes down. A verb with no arguments at all fails
+    the shape, which is deliberate: ``id`` and ``whoami`` are exactly that.
+
+    An expansion used to fail the body outright. That read ``$T`` as unknowable
+    when the assignment ``T="File:ASR-9 Radar Antenna.jpg"`` sits two lines
+    above it, and ``$2`` as unknowable when the call ``n arsr.json 'air route
+    surveillance radar'`` sits one line below — twelve prompts in three days of
+    shipped log, every one of them an archive search term being URL-encoded.
+    Anything the expansion syntax leaves unaccounted for still fails: a
+    leftover ``$`` after the named forms are removed is ``$(``, ``$$`` or
+    ``$?``, none of which the command line shows.
     """
     match = _LITERAL_SUBST.match(body)
     if not match:
         return False
     if match.group("verb").lower() in _STATE_READING:
         return False
-    return not any(
-        "$" in span or "`" in span
-        for span in _DOUBLE_QUOTED.findall(match.group("args"))
-    )
+    for span in _DOUBLE_QUOTED.findall(match.group("args")):
+        if any(char in _EXPANSION.sub("", span) for char in "$`"):
+            return False
+        if not all(_expansion_is_literal(found.group(1), text, offset)
+                   for found in _EXPANSION.finditer(span)):
+            return False
+    return True
 
 
 def _confirm_curl_cmdsubst_url(text: str, matched: str, cwd: str | None = None,
                                raw: str | None = None) -> bool:
     """At least one substitution has to be able to carry something out.
 
+    Read against ``raw``. Whether a substitution is bound to a literal is a
+    question about shell STRUCTURE — which quotes are still standing, what the
+    assignments and call sites say — and a normalized variant has had its quotes
+    dissolved, so every body there parses as unquoted and nothing could ever
+    clear. ``_first_confirmed`` offers each variant in turn and any one of them
+    confirming gates, so answering the normalized variant from its own text
+    would have defeated the binding test on every command.
+
     The pattern stops at the opening ``$(``, so the bodies sit at or past the
-    match. A body this cannot parse yields nothing and the finding stands.
+    match, and that offset filter holds whenever the match is findable in the
+    raw text. When normalization rewrote the command so it is not, every
+    substitution is weighed instead — a strictly stronger condition to clear,
+    never a weaker one.
     """
-    position = text.find(matched)
-    if position < 0:
-        return True
-    bodies = [body for offset, body in _substitution_bodies(text)
-              if offset >= position]
+    source = raw if raw is not None else text
+    position = source.find(matched)
+    bodies = [(offset, body) for offset, body in _substitution_bodies(source)
+              if offset >= max(position, 0)]
     if not bodies:
         return True
-    return not all(_substitution_is_literal(body) for body in bodies)
+    return not all(_substitution_is_literal(body, source, offset)
+                   for offset, body in bodies)
 
 
 _POSITIONAL_CONFIRMERS = {

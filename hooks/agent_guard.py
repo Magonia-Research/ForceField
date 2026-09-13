@@ -417,6 +417,32 @@ def check_credentials(prompt: str) -> tuple[str, str, str] | None:
     )
 
 
+# A closing tag, and whatever may follow the matched one without giving it
+# anything to govern: whitespace and further closing tags.
+_IS_CLOSING_TAG = re.compile(r"<\s*/")
+_TRAILING_CLOSERS = re.compile(r"(?:\s|</[\w:.-]+>)*")
+
+
+def _reframes_nothing(prompt: str, match: "re.Match[str]") -> bool:
+    """True when a matched role tag has no content behind it to reframe.
+
+    A role delimiter works by changing how the text AFTER it is read: an opening
+    tag starts a spoofed block, and a closing one ends a real block early so
+    that what follows escapes it. A CLOSING tag with nothing behind it but
+    whitespace and further closing tags does neither — there is no text left for
+    it to govern.
+
+    Three of the four ``xml_tag_injection`` findings in the whole shipped log
+    were a trailing ``</prompt>``: the orchestrator's own tool-call envelope
+    leaking into the end of the prompt it was writing. The fourth sat mid-text
+    and still asks. An attacker gains nothing here, because using a tag this way
+    requires the payload to sit after it, which is precisely what this forbids.
+    """
+    if not _IS_CLOSING_TAG.match(match.group(0)):
+        return False
+    return _TRAILING_CLOSERS.fullmatch(prompt[match.end():]) is not None
+
+
 def check_injection(prompt: str) -> tuple[str, str, str] | None:
     """Flag an injection attempt being ISSUED, not one being described.
 
@@ -437,6 +463,8 @@ def check_injection(prompt: str) -> tuple[str, str, str] | None:
     for name, pattern in INJECTION_PATTERNS.items():
         for match in pattern.finditer(prompt):
             if is_prohibition(prompt, match.start(), match.end()):
+                continue
+            if name == "xml_tag_injection" and _reframes_nothing(prompt, match):
                 continue
             return (
                 "ask",
