@@ -745,7 +745,7 @@ covered shapes are listed in the field reference.
 
 It applies least privilege at subagent spawn: blocks credential leakage into subagent prompts,
 detects injection and dangerous permission modes, flags excessive privilege and sensitive paths,
-bounds prompt size, and rate-limits spawns over a rolling hour (10 ask, 20 deny). It injects the
+bounds prompt size, and rate-limits spawns over a rolling hour (100 ask, 150 deny). It injects the
 security constraints into the subagent's own prompt so the child inherits them.
 
 The rate limit meters the expensive model tier only. A spawn naming `sonnet` or `haiku` is not

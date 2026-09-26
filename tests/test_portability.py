@@ -1642,7 +1642,7 @@ print("PASS: the spawn budget still counts every concurrent bump")
 # hook timeout and took the verdict with it. A BOUNDED lock obeyed its deadline
 # correctly and moved the failure somewhere worse: with any same-uid process
 # holding the lock, 25 spawns produced 25 allows and 0 persisted timestamps, so
-# MAX_SPAWNS_ASK (10) and MAX_SPAWNS_DENY (20) never fired at all. No timeout
+# MAX_SPAWNS_ASK and MAX_SPAWNS_DENY never fired at all. No timeout
 # value fixes that; read-modify-write is the wrong shape for a tally.
 #
 # So the assertion is now the strong one: a held lock changes NOTHING. There is

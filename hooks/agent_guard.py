@@ -27,8 +27,8 @@ import time
 from pathlib import Path
 
 MAX_PROMPT_ASK = 10_000
-MAX_SPAWNS_ASK = 10
-MAX_SPAWNS_DENY = 20
+MAX_SPAWNS_ASK = 100
+MAX_SPAWNS_DENY = 150
 
 # The spawn budget is a rolling window, not a lifetime tally.
 #
