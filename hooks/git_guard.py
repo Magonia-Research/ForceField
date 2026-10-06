@@ -70,10 +70,15 @@ _RCE_ENV_VARS = (
 )
 
 # commands that create or modify a file, used to catch writes into .git internals.
+# `(?<![-\w])` and not `\b`, for the reason filesystem_guard carries the same
+# guard on the same list: a word boundary holds inside an option bundle, so `ln`
+# matches a `-ln` flag. `of=` keeps its own branch because `\b` after `=` fails
+# when the next character is also non-word.
 _WRITE_VERB = (
-    r">>?|\btee\b|\bcp\b|\bmv\b|\bln\b|\binstall\b|\bchmod\b|\bdd\b|\bof="
-    r"|\btruncate\b|\bsed\b|\bpatch\b|\bprintf\b|\bpython[0-9.]*\b|\bperl\b"
-    r"|\bruby\b|\bnode\b"
+    r">>?"
+    r"|(?<![-\w])(?:tee|cp|mv|ln|install|chmod|dd|truncate|sed|patch|printf"
+    r"|python[0-9.]*|perl|ruby|node)\b"
+    r"|(?<![-\w])of="
 )
 
 # git's own global options: the only tokens that may sit between ``git`` and its
@@ -340,6 +345,16 @@ _GIT_VALUE_OPTS = frozenset({
 # graded on its own.
 _CLONE_HELP = re.compile(r"(?:^|\s)(?:--help|-h)(?=$|\s)")
 
+# A clone that writes no working tree cannot run either hazard this finding
+# names: the checkout-time hook path and submodule materialization both need one.
+# Measured on git 2.54.0, `--no-checkout` leaves the submodule absent even with
+# `--recurse-submodules` passed explicitly AND `clone.recurseSubmodules=true`
+# configured, and `--bare`/`--mirror` write no tree at all. `-n` is the short
+# `--no-checkout`. A later clone in another segment is still graded on its own.
+_CLONE_NO_WORKTREE = re.compile(
+    r"(?:^|\s)(?:--no-checkout|--bare|--mirror|-n)(?=$|\s)"
+)
+
 
 def _invokes_clone(segment: str) -> bool:
     """Whether ``clone`` is the SUBCOMMAND here, not merely a word in the text.
@@ -384,7 +399,7 @@ def _invokes_clone(segment: str) -> bool:
 def _unhardened_clone_segment(normalized: str) -> str | None:
     """Text of the first segment here that actually INVOKES an unhardened clone.
 
-    Two refinements the pattern alone cannot make. Both matter more for this
+    Three refinements the pattern alone cannot make. All matter more for this
     pattern than for any other in the file, because this is the one that sees
     every clone instead of a flagged minority.
 
@@ -397,6 +412,11 @@ def _unhardened_clone_segment(normalized: str) -> str | None:
     *Scope.* Hardening is judged per segment, not per command, so
     ``<hardened clone> && git clone <other>`` cannot launder the second clone
     with the first one's flags.
+
+    *Working tree.* A clone that checks nothing out has already closed the window
+    this finding is about — see ``_CLONE_NO_WORKTREE``. Hardening flags are the
+    other way to close it, so recognizing both keeps this a redirect rather than
+    a toll on every clone.
 
     Fails toward the ask. ``shell_context`` degrades toward the caller's prior
     behaviour by design, and the prior behaviour of this pattern is to match.
@@ -414,6 +434,8 @@ def _unhardened_clone_segment(normalized: str) -> str | None:
         if not match or _is_hardened_clone(segment):
             continue
         if _CLONE_HELP.search(segment) or not _invokes_clone(segment):
+            continue
+        if _CLONE_NO_WORKTREE.search(segment):
             continue
         return match.group(0)
     return None

@@ -141,10 +141,15 @@ BASH_SINK_PATTERNS: dict[str, re.Pattern[str]] = {
 # Split in two because the verb alone says nothing about which file is written.
 # These name their target as an argument, so the sink being in the same segment
 # is evidence.
+# `(?<![-\w])` and not `\b`: a word boundary holds inside an option bundle, so
+# `ln` matched ripgrep's `-ln` and turned `rg -ln "x" ~/.claude/settings.json`
+# into a settings WRITE. A flag is not a command word. `of=` keeps its own branch
+# because a trailing `\b` after `=` fails whenever the next character is also
+# non-word, which is every real `of=/path`.
 _BASH_TARGET_VERB = re.compile(
-    r"\btee\b|\bcp\b|\bmv\b|\bln\b|\binstall\b|\bdd\b|\bof="
-    r"|\btruncate\b|\bsed\b|\bpatch\b"
-    r"|\bpython[0-9.]*\b|\bperl\b|\bruby\b|\bnode\b|\btouch\b|\bchmod\b",
+    r"(?<![-\w])(?:tee|cp|mv|ln|install|dd|truncate|sed|patch"
+    r"|python[0-9.]*|perl|ruby|node|touch|chmod)\b"
+    r"|(?<![-\w])of=",
     re.IGNORECASE,
 )
 

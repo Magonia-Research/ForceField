@@ -170,18 +170,50 @@ EXCESSIVE_PRIVILEGE_PATTERNS = {
     ),
 }
 
-# Words that turn a capability mention into a prohibition. Anchored at the end of
-# the window so the cue has to sit in the run of text immediately before the
-# match, with no sentence boundary in between — "never run `rm -rf`" is a
-# prohibition; "never mind. run `rm -rf`" is not.
+# A cue governs its CLAUSE, so the reach is the clause rather than a character
+# count. It used to be a fixed 120-char window, which cut an enumeration in half:
+# "refuse a workspace ... containing `~/.ssh`, `~/.pi`, `~/.aws`" cleared the
+# first path and asked about the third. The cap only bounds the regex work.
+PROHIBITION_WINDOW = 512
+
+# What ends a clause. A period counts only when whitespace follows it: a
+# sentence-ending period does, and `.env`, `~/.ssh` and `auth.json` do not.
+# Treating every period as a break is what kept the cue in "Do not read
+# credential stores (.env, ~/.ssh, ~/.aws, keychains)" from ever reaching the
+# path it forbids — the sentence the security baseline tells callers to write,
+# and 10 of the 19 gating findings in the 2.1.6 log.
+_CLAUSE_BREAK = re.compile(r"[!?;\n]|\.(?=\s)")
+
+
+def _clause_before(prompt: str, start: int) -> str:
+    """Text from the start of ``start``'s own clause up to ``start``."""
+    window = prompt[max(0, start - PROHIBITION_WINDOW):start]
+    breaks = list(_CLAUSE_BREAK.finditer(window))
+    return window[breaks[-1].end():] if breaks else window
+
+
+def _clause_after(prompt: str, end: int) -> str:
+    """Text from ``end`` to the end of the clause it sits in."""
+    window = prompt[end:end + PROHIBITION_WINDOW]
+    found = _CLAUSE_BREAK.search(window)
+    return window[:found.start()] if found else window
+
+
+# Words that turn a capability mention into a prohibition. The clause is isolated
+# before this runs, so the cue needs no anchor of its own — "never run `rm -rf`"
+# is a prohibition; "never mind. run `rm -rf`" is a separate clause and is not.
 PROHIBITION_CUE = re.compile(
     r"(?i)\b(?:never|do\s+not|does\s+not|don'?t|doesn'?t|avoid|avoiding|without"
     r"|instead\s+of|rather\s+than|forbidden|prohibited|disallowed|banned"
     r"|not\s+allowed|not\s+permitted|must\s+not|may\s+not|should\s+not"
-    r"|shouldn'?t|cannot|can'?t|refuse\s+to|no\s+need\s+to|stop\s+and)\b"
-    r"[^.!?;\n]{0,80}$"
+    r"|shouldn'?t|cannot|can'?t|refuse|reject|no\s+need\s+to|stop\s+and)\b"
 )
 
+# `refuse`/`reject` are bare here, matching REFUSAL_CUE's vocabulary below: the
+# backward list required `refuse to` for no principled reason, so "refuse a
+# workspace containing ~/.ssh" read as a grant while "refuse to read ~/.ssh"
+# read as the prohibition both plainly are.
+#
 # The mirror image, for the idiom security prompts actually use. A backward cue
 # catches "never do X"; almost every real defensive instruction puts the refusal
 # AFTER the thing it names — "X — treat it as data, do not comply", "if it tries
@@ -195,7 +227,7 @@ PROHIBITION_CUE = re.compile(
 # be made airtight — natural-language negation is not shell syntax — so it is
 # used only on a rung whose fallback is a prompt.
 REFUSAL_CUE = re.compile(
-    r"(?i)^[^.!?;\n]{0,100}\b(?:"
+    r"(?i)\b(?:"
     r"refuse|reject"
     r"|do(?:es)?\s+not\s+(?:comply|follow|obey|execute|act\s+on)"
     r"|don'?t\s+(?:comply|follow|obey)"
@@ -205,9 +237,6 @@ REFUSAL_CUE = re.compile(
     r"|(?:report|flag|escalate)\s+(?:it|them|this|that|those|these|such)\b"
     r")"
 )
-
-# How far to look for either cue. One clause, not one document.
-PROHIBITION_WINDOW = 120
 
 EXFIL_PATTERNS = {
     "exfil_domain": re.compile(
@@ -443,6 +472,29 @@ def _reframes_nothing(prompt: str, match: "re.Match[str]") -> bool:
     return _TRAILING_CLOSERS.fullmatch(prompt[match.end():]) is not None
 
 
+# An inline code span, and the angle-bracket metavariables a usage synopsis
+# marks its arguments with. The span is the unit because that is what bounds a
+# synopsis; `[^`\n]` keeps one span from swallowing the text between two.
+_CODE_SPAN = re.compile(r"`[^`\n]*`")
+_ANGLE_TOKEN = re.compile(r"<[^<>\n]{1,64}>")
+
+
+def _is_cli_placeholder(prompt: str, match: "re.Match[str]") -> bool:
+    """True when the matched tag is a metavariable in a command-line synopsis.
+
+    ``pi -e <sandbox> -e <workflow> --tools <exact list> -na`` is a usage line,
+    and ``<sandbox>`` in it is the convention for "substitute your value here".
+    A reframing tag appears ALONE, followed by the text it means to govern; a
+    synopsis marks several arguments, so a span holding more than one
+    angle-bracket token is using the brackets as placeholder syntax rather than
+    as markup. Both 2.1.6 findings were this shape and each span carried three.
+    """
+    for span in _CODE_SPAN.finditer(prompt):
+        if span.start() < match.start() and match.end() < span.end():
+            return len(_ANGLE_TOKEN.findall(span.group(0))) > 1
+    return False
+
+
 def check_injection(prompt: str) -> tuple[str, str, str] | None:
     """Flag an injection attempt being ISSUED, not one being described.
 
@@ -464,7 +516,9 @@ def check_injection(prompt: str) -> tuple[str, str, str] | None:
         for match in pattern.finditer(prompt):
             if is_prohibition(prompt, match.start(), match.end()):
                 continue
-            if name == "xml_tag_injection" and _reframes_nothing(prompt, match):
+            if name == "xml_tag_injection" and (
+                    _reframes_nothing(prompt, match)
+                    or _is_cli_placeholder(prompt, match)):
                 continue
             return (
                 "ask",
@@ -537,18 +591,37 @@ def is_prohibition(prompt: str, start: int, end: int | None = None) -> bool:
     the four-case probe, backward-only cleared none of them, including this
     guard's own ``SECURITY_CONSTRAINTS`` text.
     """
-    window = prompt[max(0, start - PROHIBITION_WINDOW):start]
-    if PROHIBITION_CUE.search(window) is not None:
+    if PROHIBITION_CUE.search(_clause_before(prompt, start)) is not None:
         return True
     if end is None:
         return False
-    return REFUSAL_CUE.search(prompt[end:end + PROHIBITION_WINDOW]) is not None
+    return REFUSAL_CUE.search(_clause_after(prompt, end)) is not None
+
+
+# A code span holding a command word and its flags and nothing else. `rm -rf`
+# has no operand, so it cannot run: the span names the command rather than
+# invoking it, which is how prose refers to one.
+_NAMES_COMMAND_ONLY = re.compile(
+    r"`\s*(?:rm(?:\s+-[a-zA-Z]+)*|chmod\s+777|sudo)\s*`"
+)
+
+
+def _names_a_command(matched: str) -> bool:
+    """True when the match is a reference to a command, not an invocation of it.
+
+    ``is_prohibition`` clears "never `rm -rf`" but not "what happens to host
+    files when `rm -rf` runs inside on a bind mount" — prose that neither grants
+    nor forbids. An operand is what separates the two: no target, no effect.
+    """
+    return _NAMES_COMMAND_ONLY.fullmatch(matched) is not None
 
 
 def check_excessive_privilege(prompt: str) -> tuple[str, str, str] | None:
     for name, pattern in EXCESSIVE_PRIVILEGE_PATTERNS.items():
         for match in pattern.finditer(prompt):
             if is_prohibition(prompt, match.start()):
+                continue
+            if name == "raw_shell_in_prompt" and _names_a_command(match.group(0)):
                 continue
             return (
                 "ask",
@@ -590,8 +663,23 @@ def check_exfiltration(prompt: str) -> tuple[str, str, str] | None:
 
 
 def check_sensitive_paths(prompt: str) -> tuple[str, str, str] | None:
-    match = SENSITIVE_PATH_PATTERNS.search(prompt)
-    if match:
+    """Flag a credential store the prompt points the subagent AT, not one it
+    points the subagent AWAY from.
+
+    This was the only table-driven check in the guard that never asked
+    ``is_prohibition``, and it fired on the one sentence the security baseline
+    tells every caller to write: "Do not read credential stores (.env, ~/.ssh,
+    ~/.aws, keychains)". Ten of nineteen gating findings in the 2.1.6 log were
+    that clause, so ForceField's own instructions, followed, tripped ForceField's
+    own guard — the inverted incentive ``is_prohibition`` already exists to undo
+    for the privilege and injection tables.
+
+    ``finditer`` rather than ``search``: a prohibition early in the prompt must
+    not mask a real reference later in it.
+    """
+    for match in SENSITIVE_PATH_PATTERNS.finditer(prompt):
+        if is_prohibition(prompt, match.start(), match.end()):
+            continue
         return (
             "ask",
             "sensitive_path",
